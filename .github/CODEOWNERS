@@ -1,0 +1,43 @@
+###################################
+##### Global Protection Rule ######
+###################################
+# NOTE: This rule is overriden by the more specific rules below. This is the catch-all rule for all files not covered by the more specific rules below.
+*                                               @swirldslabs/hedera-codex-marketplace-maintainers
+
+############################
+#####  Project Files  ######
+############################
+
+/src/**                                         @swirldslabs/hedera-codex-marketplace-committers @swirldslabs/hedera-codex-marketplace-maintainers
+/test/**                                        @swirldslabs/hedera-codex-marketplace-committers @swirldslabs/hedera-codex-marketplace-maintainers
+/resources/**                                   @swirldslabs/hedera-codex-marketplace-committers @swirldslabs/hedera-codex-marketplace-maintainers
+
+#########################
+#####  Core Files  ######
+#########################
+
+# NOTE: Must be placed last to ensure enforcement over all other rules
+
+# Protection Rules for Github Configuration Files and Actions Workflows
+/.github/                                       @swirldslabs/platform-ci @swirldslabs/hedera-codex-marketplace-maintainers
+
+# Codacy Tool Configurations
+/config/                                        @swirldslabs/hedera-codex-marketplace-maintainers
+.remarkrc                                       @swirldslabs/hedera-codex-marketplace-maintainers
+
+# Semantic Release Configuration
+.releaserc                                      @swirldslabs/platform-ci
+
+# Self-protection for root CODEOWNERS files (this file should not exist and should definitely require approval)
+/CODEOWNERS                                     @swirldslabs/platform-ci
+
+# Protect the repository root files
+/README.md                                      @swirldslabs/hedera-codex-marketplace-committers @swirldslabs/hedera-codex-marketplace-maintainers @swirldslabs/platform-ci
+**/LICENSE                                      @swirldslabs/hedera-codex-marketplace-committers @swirldslabs/hedera-codex-marketplace-maintainers @swirldslabs/platform-ci
+
+# CodeCov configuration
+**/codecov.yml                                  @swirldslabs/hedera-codex-marketplace-committers @swirldslabs/hedera-codex-marketplace-maintainers @swirldslabs/platform-ci
+
+# Git Ignore definitions
+**/.gitignore                                   @swirldslabs/hedera-codex-marketplace-committers @swirldslabs/hedera-codex-marketplace-maintainers @swirldslabs/platform-ci
+**/.gitignore.*                                 @swirldslabs/hedera-codex-marketplace-committers @swirldslabs/hedera-codex-marketplace-maintainers @swirldslabs/platform-ci

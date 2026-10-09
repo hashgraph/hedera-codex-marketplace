@@ -1,0 +1,12 @@
+# Build output (matches every module's build/ and .gradle/ at any depth)
+build
+.gradle
+out
+bin
+
+# IDE
+.idea
+*.iml
+
+# OS
+.DS_Store

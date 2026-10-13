@@ -1,0 +1,7 @@
+{
+  "name": "hedera",
+  "interface": {
+    "displayName": "Hedera"
+  },
+  "plugins": []
+}

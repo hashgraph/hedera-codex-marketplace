@@ -1,12 +1,17 @@
-# Build output (matches every module's build/ and .gradle/ at any depth)
-build
-.gradle
-out
-bin
-
 # IDE
 .idea
+.vscode
 *.iml
 
 # OS
 .DS_Store
+
+# Local env / secrets
+.env
+.env.*
+
+# Logs
+*.log
+
+# Plugins ship their built node_modules (incl. native *.node binaries); never ignore them
+!plugins/**/node_modules/

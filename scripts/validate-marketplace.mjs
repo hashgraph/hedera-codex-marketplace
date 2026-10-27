@@ -2,7 +2,7 @@
 // Checks a Hedera plugin marketplace repo: the manifest, every plugin entry, and the plugins/ tree.
 // No dependencies. Identical in hedera-claude-marketplace and hedera-codex-marketplace.
 //
-//   node scripts/validate-marketplace.mjs [root] [--harness=claude|codex] [--check-remote]
+//   node scripts/validate-marketplace.mjs [root] [--harness=claude|codex] [--check-remote[=true|false]]
 //
 // --harness defaults to whichever manifest exists under root. --check-remote also fetches every
 // pinned git commit over https, to prove it exists and is public (needs network and git).
@@ -44,7 +44,6 @@ const SEMVER =
 const FORBIDDEN_FILE =
   /(^|\/)(\.env(\..*)?|.*\.pem|.*\.p12|id_rsa|id_ed25519)$|(^|\/)keystore(\/|$)/i;
 const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
-const TEXT_FILE = /\.(mjs|cjs|js|json|md|sh|txt|ya?ml)$/i;
 const LFS_POINTER = 'version https://git-lfs.github.com/spec/';
 const LFS_ATTRIBUTE = /(^|\s)filter=lfs(\s|$)/m;
 const NOTICES_FILE = /^THIRD_PARTY_NOTICES(\..+)?$/i;
@@ -68,9 +67,14 @@ function walk(dir) {
   return files;
 }
 
+function isBinary(buffer) {
+  return buffer.subarray(0, 8192).includes(0);
+}
+
 /**
  * Local state or key material anywhere under plugins/ (repos are public). Vendored node_modules/
  * is shipped as-is: its file names are still checked, but its third-party JS is not content-scanned.
+ * Every other file is content-scanned whatever its extension; binaries (a NUL byte early on) are skipped.
  */
 function findSecrets(pluginsDir) {
   const problems = [];
@@ -78,8 +82,11 @@ function findSecrets(pluginsDir) {
     const rel = path.relative(pluginsDir, file).split(path.sep).join('/');
     const vendored = rel.split('/').includes('node_modules');
     if (FORBIDDEN_FILE.test(rel)) problems.push(`plugins/${rel}: local state or key file`);
-    else if (!vendored && TEXT_FILE.test(rel) && PRIVATE_KEY_BLOCK.test(readFileSync(file, 'utf8'))) {
-      problems.push(`plugins/${rel}: contains a private key block`);
+    else if (!vendored) {
+      const content = readFileSync(file);
+      if (!isBinary(content) && PRIVATE_KEY_BLOCK.test(content.toString('utf8'))) {
+        problems.push(`plugins/${rel}: contains a private key block`);
+      }
     }
   }
   return problems;
@@ -295,18 +302,29 @@ export function validateMarketplace(root, harness, { checkRemote = false } = {})
   return problems;
 }
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const parsed = { _: [] };
   for (const arg of argv) {
     const match = arg.match(/^--([^=]+)(?:=(.*))?$/);
     if (match) parsed[match[1]] = match[2] ?? true;
     else parsed._.push(arg);
   }
+  const remote = parsed['check-remote'];
+  if (remote !== undefined && !['true', 'false', true].includes(remote)) {
+    throw new Error(`--check-remote takes true or false, got "${remote}"`);
+  }
+  parsed['check-remote'] = remote === true || remote === 'true';
   return parsed;
 }
 
 function main() {
-  const args = parseArgs(process.argv.slice(2));
+  let args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    console.error(error.message);
+    process.exit(1);
+  }
   const root = path.resolve(args._[0] ?? '.');
   const harness =
     args.harness ??
@@ -315,7 +333,7 @@ function main() {
     console.error('No marketplace manifest found; pass --harness=claude|codex.');
     process.exit(1);
   }
-  const problems = validateMarketplace(root, harness, { checkRemote: Boolean(args['check-remote']) });
+  const problems = validateMarketplace(root, harness, { checkRemote: args['check-remote'] });
   if (problems.length > 0) {
     console.error(`${problems.length} problem(s) in ${HARNESSES[harness]?.marketplacePath ?? harness}:`);
     for (const problem of problems) console.error(`  - ${problem}`);

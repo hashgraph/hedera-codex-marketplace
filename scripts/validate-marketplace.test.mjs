@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, test } from 'node:test';
 
-import { HARNESSES, validateMarketplace } from './validate-marketplace.mjs';
+import { HARNESSES, parseArgs, validateMarketplace } from './validate-marketplace.mjs';
 
 const SHA = 'a'.repeat(40);
 const roots = [];
@@ -16,7 +16,7 @@ afterEach(() => {
 function write(root, rel, content) {
   const file = path.join(root, rel);
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, typeof content === 'string' ? content : `${JSON.stringify(content, null, 2)}\n`);
+  writeFileSync(file, typeof content === 'string' || Buffer.isBuffer(content) ? content : `${JSON.stringify(content, null, 2)}\n`);
 }
 
 const BASE = {
@@ -164,11 +164,15 @@ for (const harness of ['claude', 'codex']) {
       write(root, 'plugins/demo/.env', 'SECRET=1');
       write(root, 'plugins/demo/keystore/key.json', '{}');
       write(root, 'plugins/demo/src/a.js', '-----BEGIN EC PRIVATE KEY-----\nabc');
+      write(root, 'plugins/demo/src/b.ts', '-----BEGIN EC PRIVATE KEY-----\nabc');
+      write(root, 'plugins/demo/lib/c.bin', Buffer.from('\0-----BEGIN EC PRIVATE KEY-----'));
       write(root, 'plugins/demo/node_modules/dep/index.js', '-----BEGIN EC PRIVATE KEY-----');
       const output = validate(root).join('\n');
       assert.match(output, /plugins\/demo\/\.env: local state or key file/);
       assert.match(output, /plugins\/demo\/keystore\/key\.json: local state or key file/);
       assert.match(output, /plugins\/demo\/src\/a\.js: contains a private key block/);
+      assert.match(output, /plugins\/demo\/src\/b\.ts: contains a private key block/);
+      assert.doesNotMatch(output, /c\.bin/);
       assert.doesNotMatch(output, /node_modules/);
     });
 
@@ -209,6 +213,16 @@ for (const harness of ['claude', 'codex']) {
     });
   });
 }
+
+describe('parseArgs', () => {
+  test('--check-remote is a boolean flag', () => {
+    assert.equal(parseArgs([])['check-remote'], false);
+    assert.equal(parseArgs(['--check-remote'])['check-remote'], true);
+    assert.equal(parseArgs(['--check-remote=true'])['check-remote'], true);
+    assert.equal(parseArgs(['--check-remote=false'])['check-remote'], false);
+    assert.throws(() => parseArgs(['--check-remote=nope']), /takes true or false/);
+  });
+});
 
 describe('claude only', () => {
   test('requires owner.name', () => {

@@ -1,0 +1,45 @@
+name: "Validate Marketplace"
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+defaults:
+  run:
+    shell: bash
+
+# Plugin PRs come from forks, so this uses pull_request (not pull_request_target) and no secrets.
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-marketplace-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate marketplace
+    runs-on: hg-hxm-lin-md
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      - name: Test the validator
+        run: node --test scripts/*.test.mjs
+
+      - name: Validate manifest, plugins and pinned commits
+        run: node scripts/validate-marketplace.mjs . --check-remote

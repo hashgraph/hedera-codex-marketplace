@@ -1,0 +1,24 @@
+{
+  "name": "hedera-agent-accounts",
+  "version": "0.1.0-rc.2",
+  "description": "Agent identity, payments, and Hedera signing for AI agents on Hedera.",
+  "author": {
+    "name": "Hashgraph"
+  },
+  "homepage": "https://github.com/hashgraph/hedera-codex-marketplace/tree/main/plugins/hedera-agent-accounts",
+  "repository": "https://github.com/hashgraph/hedera-codex-marketplace",
+  "license": "Apache-2.0",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Hedera Agent Accounts",
+    "shortDescription": "Agent identity, payments, and Hedera signing for AI agents on Hedera.",
+    "developerName": "Hashgraph",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ]
+  }
+}

@@ -3,5 +3,19 @@
   "interface": {
     "displayName": "Hedera"
   },
-  "plugins": []
+  "plugins": [
+    {
+      "name": "hedera-agent-accounts",
+      "description": "Agent identity, payments, and Hedera signing for AI agents on Hedera.",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hedera-agent-accounts"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
 }

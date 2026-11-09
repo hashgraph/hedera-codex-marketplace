@@ -1,0 +1,76 @@
+name: "PR Checks"
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+defaults:
+  run:
+    shell: bash
+
+# Plugin PRs come from forks, so this uses pull_request (not pull_request_target) and no secrets.
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+# The job names are the status checks the branch rulesets require on main.
+jobs:
+  compiles:
+    name: Code / Compiles
+    runs-on: hg-hxm-lin-md
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      # The repo ships no build: plugins are committed as built. "Compiles" means every
+      # tracked script parses and every tracked JSON file is valid.
+      - name: Parse scripts and JSON
+        run: |
+          status=0
+          while IFS= read -r -d '' f; do
+            node --check "$f" || { echo "::error file=$f::does not parse"; status=1; }
+          done < <(git ls-files -z -- '*.js' '*.mjs' '*.cjs')
+          while IFS= read -r -d '' f; do
+            node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$f" \
+              || { echo "::error file=$f::is not valid JSON"; status=1; }
+          done < <(git ls-files -z -- '*.json')
+          exit $status
+
+  unit-tests:
+    name: Unit Tests / Standard
+    runs-on: hg-hxm-lin-md
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+
+      - name: Test the validator
+        run: node --test scripts/*.test.mjs

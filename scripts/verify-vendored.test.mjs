@@ -191,9 +191,80 @@ describe('verifyVendored', () => {
     const { fetch } = fakeRegistry(published());
     const root = makeRepo(vendored({ 'plugins/demo/bin/helper.node': BUILD, 'plugins/demo/vendor/loose.node': BUILD }));
     assert.deepEqual((await verifyVendored(root, { fetch })).problems, [
-      'plugins/demo/bin/helper.node: native .node file outside a vendored npm package',
-      'plugins/demo/vendor/loose.node: native .node file outside a vendored npm package',
+      'plugins/demo/bin/helper.node: compiled binary outside a vendored npm package',
+      'plugins/demo/vendor/loose.node: compiled binary outside a vendored npm package',
     ]);
+  });
+
+  test('any compiled binary outside a package fails, by extension or by header', async () => {
+    const { fetch } = fakeRegistry(published());
+    const pe = Buffer.alloc(128);
+    pe.write('MZ', 0, 'latin1');
+    pe.writeUInt32LE(64, 0x3c);
+    pe.write('PE\0\0', 64, 'latin1');
+    const root = makeRepo(
+      vendored({
+        'plugins/demo/lib/helper.so': 'x',
+        'plugins/demo/lib/core.wasm': 'x',
+        'plugins/demo/lib/libssl.so.3': 'x',
+        'plugins/demo/assets/logo.png': BUILD,
+        'plugins/demo/assets/tool.exe.txt': pe,
+        'plugins/demo/assets/run.wasm.md': Buffer.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]),
+        'plugins/demo/assets/icon.png': Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        'plugins/demo/README.md': 'MZ is a fine way to start a sentence.\n',
+      }),
+    );
+    assert.deepEqual((await verifyVendored(root, { fetch })).problems, [
+      'plugins/demo/assets/logo.png: compiled binary outside a vendored npm package',
+      'plugins/demo/assets/run.wasm.md: compiled binary outside a vendored npm package',
+      'plugins/demo/assets/tool.exe.txt: compiled binary outside a vendored npm package',
+      'plugins/demo/lib/core.wasm: compiled binary outside a vendored npm package',
+      'plugins/demo/lib/helper.so: compiled binary outside a vendored npm package',
+      'plugins/demo/lib/libssl.so.3: compiled binary outside a vendored npm package',
+    ]);
+  });
+
+  test('an allowed LICENSE that is really a binary fails', async () => {
+    const { fetch } = fakeRegistry(published());
+    const root = makeRepo(vendored({ [`${DIR}/LICENSE`]: BUILD }));
+    assert.deepEqual((await verifyVendored(root, { fetch })).problems, [
+      `${DIR}/LICENSE: compiled binary outside a vendored npm package`,
+    ]);
+  });
+
+  test('a folder under vendor/ or node_modules/ that is not an npm package fails', async () => {
+    const { fetch } = fakeRegistry(published());
+    const root = makeRepo(
+      vendored({
+        'plugins/demo/vendor/no-version/package.json': { name: 'no-version' },
+        'plugins/demo/vendor/no-version/index.js': 'evil();\n',
+        'plugins/demo/vendor/loose/index.js': 'evil();\n',
+        'plugins/demo/node_modules/@acme/thing/index.js': 'evil();\n',
+        [`${DIR}/node_modules/dep/index.js`]: 'evil();\n',
+      }),
+    );
+    assert.deepEqual((await verifyVendored(root, { fetch })).problems, [
+      `${DIR}/node_modules/dep/index.js: not in @acme/keyring@1.0.0 on npm`,
+      'plugins/demo/node_modules/@acme/thing: not a vendored npm package (needs a package.json with name and version)',
+      `${DIR}/node_modules/dep: not a vendored npm package (needs a package.json with name and version)`,
+      'plugins/demo/vendor/loose: not a vendored npm package (needs a package.json with name and version)',
+      'plugins/demo/vendor/no-version: not a vendored npm package (needs a package.json with name and version)',
+    ]);
+  });
+
+  test("a vendor/ folder inside a package's own files is part of that package", async () => {
+    const files = { 'package.json': PKG, 'index.js': INDEX, 'vendor/inner/a.js': 'a\n' };
+    const { fetch } = fakeRegistry({ '@acme/keyring@1.0.0': { files } });
+    const root = makeRepo({ [`${DIR}/package.json`]: PKG, [`${DIR}/index.js`]: INDEX, [`${DIR}/vendor/inner/a.js`]: 'a\n' });
+    assert.deepEqual(await verifyVendored(root, { fetch }), { lines: ['@acme/keyring@1.0.0: 3 files match npm'], problems: [] });
+  });
+
+  test("lists each package's npm maintainers", async () => {
+    const registry = published();
+    registry['@acme/keyring@1.0.0'].meta.maintainers = [{ name: 'alice', email: 'a@x' }, { name: 'bob' }];
+    const { fetch } = fakeRegistry(registry);
+    const { lines } = await verifyVendored(makeRepo(vendored()), { fetch });
+    assert.deepEqual(lines, ['@acme/keyring@1.0.0: 3 files match npm (maintainers alice, bob)', '@acme/keyring-darwin-arm64@1.0.0: 1 file matches npm']);
   });
 
   test('a tarball that does not match the registry integrity fails', async () => {

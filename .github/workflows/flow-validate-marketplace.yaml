@@ -38,9 +38,9 @@ jobs:
         with:
           node-version: 26
 
-      - name: Validate manifest, plugins and pinned commits
-        run: node scripts/validate-marketplace.mjs . --check-remote
-
       # Compares every package vendored under plugins/ with its npm release. Needs registry.npmjs.org.
       - name: Verify vendored packages against npm
         run: node scripts/verify-vendored.mjs .
+
+      - name: Validate manifest, plugins and pinned commits
+        run: node scripts/validate-marketplace.mjs . --check-remote

@@ -7,9 +7,11 @@
 // A vendored package is a directory under a vendor/ or node_modules/ path segment that holds a
 // package.json with "name" and "version". Each one is compared, file by file, with the tarball that
 // registry.npmjs.org publishes for that name and version (needs network). Native .node builds that
-// the package itself lacks must come from one of its optional platform packages.
+// the package itself lacks must come from one of its optional platform packages. Compiled binaries
+// outside a vendored package, and folders under vendor/ or node_modules/ that are not npm packages,
+// fail.
 import { createHash } from 'node:crypto';
-import { appendFileSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { appendFileSync, closeSync, lstatSync, openSync, readFileSync, readSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gunzipSync } from 'node:zlib';
@@ -23,7 +25,64 @@ const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
+/** Compiled code reviewers can't read: by extension, or by an ELF, Mach-O, Java class or WebAssembly header. */
+const BINARY_EXTENSION = /\.(node|so|dylib|dll|exe|wasm)$|\.so\.\d/i;
+const BINARY_MAGIC = ['7f454c46', 'cafebabe', 'feedface', 'feedfacf', 'cefaedfe', 'cffaedfe', '0061736d'];
+
 const clean = value => String(value).replace(/[\x00-\x1f\x7f]/g, '');
+
+/** The first bytes of a file. */
+function readHead(file, length) {
+  const fd = openSync(file, 'r');
+  try {
+    const buffer = Buffer.alloc(length);
+    return buffer.subarray(0, readSync(fd, buffer, 0, length, 0));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Whether a file is a compiled binary: a known extension, a known header, or a Windows PE image. */
+function isCompiledBinary(root, file) {
+  if (BINARY_EXTENSION.test(file)) return true;
+  const head = readHead(path.join(root, file), 4096);
+  if (BINARY_MAGIC.includes(head.subarray(0, 4).toString('hex'))) return true;
+  if (head.length < 64 || head.toString('latin1', 0, 2) !== 'MZ') return false;
+  const pe = head.readUInt32LE(0x3c);
+  return pe + 4 <= head.length && head.toString('latin1', pe, pe + 4) === 'PE\0\0';
+}
+
+/**
+ * Folders that should be vendored packages but aren't: each folder directly under a vendor/ or
+ * node_modules/ segment (under @scope/ for a scoped name) that is not a package, unless it is
+ * plain content of an enclosing package.
+ */
+function findStrayFolders(files, packages) {
+  const dirs = new Set(packages.map(pkg => pkg.dir));
+  const stray = new Set();
+  for (const file of files) {
+    const segments = file.split('/');
+    for (let i = 2; i < segments.length - 2; i++) {
+      if (!VENDOR_SEGMENTS.has(segments[i])) continue;
+      const end = segments[i + 1].startsWith('@') && i + 2 < segments.length - 1 ? i + 2 : i + 1;
+      const dir = segments.slice(0, end + 1).join('/');
+      if (dirs.has(dir)) continue;
+      const owner = packages.findLast(pkg => dir.startsWith(`${pkg.dir}/`));
+      if (owner && !dir.slice(owner.dir.length + 1).split('/').includes('node_modules')) continue;
+      stray.add(dir);
+    }
+  }
+  return [...stray].sort();
+}
+
+/** " (maintainers a, b)" from a registry version document, so reviewers can spot a look-alike. */
+function maintainers(meta) {
+  const names = (Array.isArray(meta?.maintainers) ? meta.maintainers : [])
+    .map(maintainer => maintainer?.name)
+    .filter(name => typeof name === 'string')
+    .map(clean);
+  return names.length > 0 ? ` (maintainers ${names.join(', ')})` : '';
+}
 
 /** Regular files under dir, as paths relative to root with "/" separators. Symlinks are not followed. */
 function walk(root, dir) {
@@ -195,6 +254,7 @@ export async function verifyVendored(root, { fetch: fetchFn = defaultFetch } = {
   }
   const packages = findPackages(root, files);
   const owned = new Set(packages.flatMap(pkg => pkg.files));
+  const unchecked = files.filter(file => !owned.has(file));
   const cache = new Map();
   const fetchOnce = (name, version) => {
     const key = `${name}@${version}`;
@@ -225,19 +285,22 @@ export async function verifyVendored(root, { fetch: fetchFn = defaultFetch } = {
       } else if (rel.endsWith('.node')) {
         const result = await checkPlatformBuild(file, content, json.name, published.meta, fetchOnce);
         if (result.error) problems.push(`${clean(file)}: ${result.error}`);
-        else platformMatches.push(result.id);
+        else platformMatches.push(result);
       } else if (rel.includes('/') || !NOTICE_FILE.test(rel)) {
         problems.push(`${clean(file)}: not in ${id} on npm`);
+      } else {
+        unchecked.push(file);
       }
     }
-    lines.push(`${id}: ${matched} ${matched === 1 ? 'file matches' : 'files match'} npm`);
-    for (const platformId of platformMatches) lines.push(`${platformId}: 1 file matches npm`);
+    lines.push(`${id}: ${matched} ${matched === 1 ? 'file matches' : 'files match'} npm${maintainers(published.meta)}`);
+    for (const platform of platformMatches) lines.push(`${platform.id}: 1 file matches npm${maintainers(platform.meta)}`);
   }
 
-  for (const file of files) {
-    if (file.endsWith('.node') && !owned.has(file)) {
-      problems.push(`${clean(file)}: native .node file outside a vendored npm package`);
-    }
+  for (const dir of findStrayFolders(files, packages)) {
+    problems.push(`${clean(dir)}: not a vendored npm package (needs a package.json with name and version)`);
+  }
+  for (const file of unchecked.sort()) {
+    if (isCompiledBinary(root, file)) problems.push(`${clean(file)}: compiled binary outside a vendored npm package`);
   }
   return { lines, problems };
 }
@@ -257,7 +320,7 @@ async function checkPlatformBuild(file, content, name, meta, fetchOnce) {
   const builds = [...published.files.keys()].filter(rel => rel.endsWith('.node'));
   if (builds.length !== 1) return { error: `${dep}@${optional[dep]} on npm does not hold exactly one .node file` };
   if (!published.files.get(builds[0]).equals(content)) return { error: `differs from ${dep}@${optional[dep]} on npm` };
-  return { id: `${dep}@${optional[dep]}` };
+  return { id: `${dep}@${optional[dep]}`, meta: published.meta };
 }
 
 async function main() {

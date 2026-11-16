@@ -43,10 +43,14 @@ libraries. For those:
   its optional platform packages, for example `keyring.darwin-arm64.node` from
   `@napi-rs/keyring-darwin-arm64`. You may leave files out, and add a `LICENSE`, `README` or
   `THIRD_PARTY_NOTICES` the package lacks.
-- Packages with a `preinstall`, `install` or `postinstall` script are not accepted, and a `*.node`
-  file outside a vendored package fails.
-- CI compares every vendored package with registry.npmjs.org and lists them in the job summary. Run
-  the same check with `node scripts/verify-vendored.mjs .`.
+- Packages with a `preinstall`, `install` or `postinstall` script are not accepted. A compiled
+  binary outside a vendored package fails: `.node`, `.so`, `.dylib`, `.dll`, `.exe`, `.wasm`, or
+  any ELF, Mach-O, Windows or WebAssembly file. So does a folder under `vendor/` or `node_modules/`
+  that isn't an npm package.
+- CI compares every vendored package with registry.npmjs.org and lists each one, with its npm
+  maintainers, in the job summary. That proves the files are the npm release, not that the package
+  is the one you meant, so reviewers check each name and its maintainers. Run the same check with
+  `node scripts/verify-vendored.mjs .`.
 - Do not ignore `vendor/` or `node_modules/` under `plugins/` in any `.gitignore`.
 - Do not use Git LFS. Clones do not download LFS files, so users would get pointer files.
 - Put one `THIRD_PARTY_NOTICES` file at the plugin root. It must cover every bundled package's licence,

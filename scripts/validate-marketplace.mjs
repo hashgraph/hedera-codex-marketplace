@@ -93,11 +93,14 @@ const OFFICIAL_PREFIX = /^(hedera|hashgraph|hiero)-/;
 /** Hosts of the remote MCP servers this marketplace already ships. Others are highlighted, not rejected. */
 const KNOWN_MCP_HOSTS = ['payment.agent-accounts.haw.blockydevs.dev'];
 const SOURCE_FIELDS = ['source', 'repo', 'url', 'path', 'ref', 'sha'];
-// Hook and MCP commands that fail the run. Paths are checked separately (findOutsidePath).
-const SHELL = String.raw`\|\s*(sudo\s+)?(\S*\/)?(ba|da|k|z)?sh\b`;
+// Hook, MCP, LSP and monitor commands that fail the run. Paths are checked separately
+// (findOutsidePath).
+const DOWNLOAD = String.raw`\b(curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b`;
+const SHELL = String.raw`\|\s*(sudo\s+)?(\S*\/)?(env\s+)?((ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php|pwsh|powershell|iex)\b`;
 const DENIED_COMMANDS = [
-  [new RegExp(String.raw`\b(curl|wget)\b.*${SHELL}`, 's'), 'pipes downloaded content to a shell'],
-  [new RegExp(String.raw`\bbase64\s+(-[A-Za-z]*[dD][A-Za-z]*|--decode)\b.*${SHELL}`, 's'), 'pipes base64-decoded content to a shell'],
+  [new RegExp(String.raw`${DOWNLOAD}.*${SHELL}`, 'is'), 'pipes downloaded content to a shell or interpreter'],
+  [new RegExp(String.raw`(\$\(|<\(|\x60)\s*${DOWNLOAD}`, 'i'), 'runs downloaded content in a shell'],
+  [new RegExp(String.raw`\bbase64\s+(-[A-Za-z]*[dD][A-Za-z]*|--decode)\b.*${SHELL}`, 's'), 'pipes base64-decoded content to a shell or interpreter'],
   [/\bsudo\b/, 'runs sudo'],
 ];
 const PLUGIN_ROOT_VAR = /^(\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT)(?=\/|$)/;
@@ -107,6 +110,10 @@ const MARKDOWN_FILE = /\.(md|mdx|markdown)$/i;
 const HTML_COMMENT = /<!--([\s\S]*?)(-->|$)/g;
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const shorten = text => {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+};
 const stripControl = value => String(value).replace(/[\x00-\x1f\x7f]/g, '');
 const codePoint = char => `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -721,9 +728,9 @@ function checkCommand(at, text) {
 }
 
 /**
- * What an in-repo plugin can run or show the model: MCP servers, hooks, bin/ files, app files,
- * scripts named in skills, and HTML comments in Markdown. Its problems are denied commands and
- * config files that cannot be read.
+ * What an in-repo plugin can run or show the model: MCP and LSP servers, hooks, monitors, bin/
+ * files, app files, scripts named in skills, and HTML comments in Markdown. Its problems are denied
+ * commands and config files that cannot be read.
  */
 function readCapabilities(root, { name, manifestPath, manifest }, files) {
   const dir = `plugins/${name}`;
@@ -732,10 +739,13 @@ function readCapabilities(root, { name, manifestPath, manifest }, files) {
     .map(file => ({ ...file, rel: file.rel.slice(name.length + 1) }));
   const exists = new Set(own.map(file => file.rel));
   const problems = [];
-  const plugin = { name, version: manifest.version, problems, mcp: [], hooks: [], bin: [], apps: [], scripts: [], comments: [] };
+  const plugin = {
+    name, version: manifest.version, problems, mcp: [], lsp: [], hooks: [], monitors: [], bin: [], apps: [], scripts: [], comments: [],
+  };
 
   // Config from the default files and from a manifest field (a path, an object, or a list of them).
-  const configs = (field, defaults) => {
+  // Monitor files hold a list, so they may be a JSON array.
+  const configs = (field, defaults, value = manifest[field], { array = false } = {}) => {
     const found = [];
     const read = new Set();
     const add = rel => {
@@ -743,11 +753,10 @@ function readCapabilities(root, { name, manifestPath, manifest }, files) {
       read.add(rel);
       const json = readJson(path.join(root, dir, rel), `${dir}/${rel}`);
       if (json.error) problems.push(json.error);
-      else if (!isObject(json.value)) problems.push(`${dir}/${rel} must be a JSON object`);
+      else if (!isObject(json.value) && !(array && Array.isArray(json.value))) problems.push(`${dir}/${rel} must be a JSON object`);
       else found.push({ file: rel, value: json.value });
     };
     for (const rel of defaults) if (exists.has(rel)) add(rel);
-    const value = manifest[field];
     for (const item of value === undefined ? [] : Array.isArray(value) ? value : [value]) {
       const rel = isRelativePath(item) ? path.posix.normalize(item) : undefined;
       if (isObject(item)) found.push({ file: manifestPath, value: item });
@@ -757,10 +766,10 @@ function readCapabilities(root, { name, manifestPath, manifest }, files) {
     return found;
   };
 
-  for (const { file, value } of configs('mcpServers', ['.mcp.json', 'mcp.json'])) {
-    const servers = isObject(value.mcpServers) ? value.mcpServers : value;
+  // MCP and LSP servers: a command with args (MCP may add a cwd), or a remote url.
+  const readServers = (kind, file, servers, into) => {
     for (const [server, config] of Object.entries(servers)) {
-      const at = `${dir}/${file}: MCP server ${JSON.stringify(server)}`;
+      const at = `${dir}/${file}: ${kind} server ${JSON.stringify(server)}`;
       const { command, args = [], cwd } = isObject(config) ? config : {};
       if (
         !isObject(config) ||
@@ -775,9 +784,13 @@ function readCapabilities(root, { name, manifestPath, manifest }, files) {
       if (command !== undefined) problems.push(...checkCommand(at, [command, ...args].join(' ')));
       const outsideCwd = cwd === undefined ? undefined : findOutsidePath(cwd);
       if (outsideCwd) problems.push(`${at} uses a path outside the plugin root: ${outsideCwd}`);
-      plugin.mcp.push({ file, server, config });
+      into.push({ file, server, config });
     }
+  };
+  for (const { file, value } of configs('mcpServers', ['.mcp.json', 'mcp.json'])) {
+    readServers('MCP', file, isObject(value.mcpServers) ? value.mcpServers : value, plugin.mcp);
   }
+  for (const { file, value } of configs('lspServers', ['.lsp.json'])) readServers('LSP', file, value, plugin.lsp);
 
   for (const { file, value } of configs('hooks', ['hooks/hooks.json'])) {
     const visit = (node, at) => {
@@ -789,9 +802,22 @@ function readCapabilities(root, { name, manifestPath, manifest }, files) {
       } else if (node.command !== undefined) {
         problems.push(`${dir}/${file}: hook ${at} command must be a string`);
       } else if (typeof node.url === 'string') plugin.hooks.push({ file, at, url: node.url });
+      else if (typeof node.prompt === 'string') plugin.hooks.push({ file, at, prompt: node.prompt });
       for (const [key, child] of Object.entries(node)) visit(child, at ? `${at}.${key}` : key);
     };
     visit(value, '');
+  }
+
+  // Monitors run a command in the background for the whole session.
+  const monitorsValue = isObject(manifest.experimental) ? manifest.experimental.monitors : undefined;
+  for (const { file, value } of configs('monitors', ['monitors/monitors.json'], monitorsValue, { array: true })) {
+    const list = Array.isArray(value) ? value : Array.isArray(value.monitors) ? value.monitors : [value];
+    list.forEach((monitor, index) => {
+      const at = `${dir}/${file}: monitor ${JSON.stringify(isObject(monitor) && typeof monitor.name === 'string' ? monitor.name : index)}`;
+      if (!isObject(monitor) || typeof monitor.command !== 'string') return problems.push(`${at} command must be a string`);
+      problems.push(...checkCommand(at, monitor.command));
+      plugin.monitors.push({ file, name: monitor.name ?? String(index), command: monitor.command });
+    });
   }
 
   plugin.apps = configs('apps', ['.app.json']).map(({ file }) => file);
@@ -812,12 +838,7 @@ function readCapabilities(root, { name, manifestPath, manifest }, files) {
       }
     }
     for (const match of text.matchAll(HTML_COMMENT)) {
-      const comment = match[1].replace(/\s+/g, ' ').trim();
-      plugin.comments.push({
-        file: rel,
-        line: text.slice(0, match.index).split('\n').length,
-        text: comment.length > 200 ? `${comment.slice(0, 200)}…` : comment,
-      });
+      plugin.comments.push({ file: rel, line: text.slice(0, match.index).split('\n').length, text: shorten(match[1]) });
     }
   }
   return plugin;
@@ -931,11 +952,11 @@ function compareWithBase(root, harness, base, { marketplace, local }) {
   return { problems, highlights, changes, changed };
 }
 
-function renderPlugin({ name, version, mcp, hooks, bin, apps, scripts, comments }) {
+function renderPlugin({ name, version, mcp, lsp, hooks, monitors, bin, apps, scripts, comments }) {
   const list = (label, items) =>
     items.length > 0 ? [`- ${label}:`, ...items.map(item => `  - ${item}`)] : [`- ${label}: none`];
   const server = ({ file, server: serverName, config }) => {
-    const parts = ['type', 'command', 'args', 'url', 'cwd']
+    const parts = ['type', 'transport', 'command', 'args', 'url', 'cwd']
       .filter(key => config[key] !== undefined && config[key].length !== 0)
       .map(key => `${key} ${key === 'args' ? config.args.map(code).join(' ') : code(config[key])}`);
     for (const key of ['env', 'headers']) {
@@ -948,10 +969,20 @@ function renderPlugin({ name, version, mcp, hooks, bin, apps, scripts, comments 
     `### ${code(name)} ${code(version)}`,
     '',
     ...list('MCP servers', mcp.map(server)),
+    ...(lsp.length > 0 ? list('LSP servers', lsp.map(server)) : []),
     ...list(
       'Hooks',
-      hooks.map(hook => `${code(hook.at)} in ${code(hook.file)}: ${hook.command !== undefined ? `command ${code(hook.command)}` : `url ${code(hook.url)}`}`),
+      hooks.map(hook => {
+        const what =
+          hook.command !== undefined ? `command ${code(hook.command)}`
+          : hook.url !== undefined ? `url ${code(hook.url)}`
+          : `prompt ${code(shorten(hook.prompt))}`;
+        return `${code(hook.at)} in ${code(hook.file)}: ${what}`;
+      }),
     ),
+    ...(monitors.length > 0
+      ? list('Monitors', monitors.map(monitor => `${code(monitor.name)} in ${code(monitor.file)}: command ${code(monitor.command)}`))
+      : []),
     ...list('Files in bin/', bin.map(code)),
     ...(apps.length > 0 ? list('App files', apps.map(code)) : []),
     ...list('Scripts named in skills', scripts.map(({ file, ref }) => `${code(ref)} in ${code(file)}`)),

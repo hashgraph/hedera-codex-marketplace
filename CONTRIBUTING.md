@@ -53,8 +53,9 @@ with a path inside the plugin, relative to its root. Remote MCP servers are allo
 
 CI rejects a hook or MCP server command that:
 
-- pipes downloaded content to a shell (`curl … | sh`, `wget … | bash`)
-- pipes base64-decoded content to a shell (`base64 -d … | sh`)
+- pipes downloaded content to a shell or interpreter (`curl … | sh`, `wget … | python3`)
+- runs downloaded content through `$(curl …)`, backticks or `<(curl …)`
+- pipes base64-decoded content to a shell or interpreter (`base64 -d … | sh`)
 - uses `sudo`
 - uses an absolute path, a path under `~` or `$HOME`, or a relative path that leaves the plugin
 

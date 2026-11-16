@@ -90,9 +90,9 @@ Details are in the
   keystore.
 - On a pull request (`--base=origin/main`), an in-repo plugin whose files changed must raise its
   `version` in semver order, so a version never goes down.
-- Hook and MCP server commands don't pipe downloaded or base64-decoded content to a shell, don't use
-  `sudo`, and use no path outside the plugin (see the plugin security policy in
-  [CONTRIBUTING.md](CONTRIBUTING.md)).
+- Hook and MCP server commands don't run downloaded or base64-decoded content in a shell or
+  interpreter, don't use `sudo`, and use no path outside the plugin (see the plugin security
+  policy in [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 The job summary lists what each changed plugin runs: MCP servers (with any auth block), hook
 commands, `bin/` files, app files, scripts named in skills and HTML comments in Markdown. It

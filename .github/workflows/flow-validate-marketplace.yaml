@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: validate-marketplace-${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: validate-marketplace-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:

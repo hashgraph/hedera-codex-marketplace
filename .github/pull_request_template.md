@@ -4,16 +4,13 @@
 - Source repository (link):
 - What changed since the last version:
 
-## Native binaries (only if the plugin ships `node_modules/` or `*.node` files)
+## Vendored packages (only if the plugin ships `vendor/`, `node_modules/` or `*.node` files)
 
-- [ ] `plugins/**/node_modules/` is not ignored, and Git LFS is not used
+CI compares vendored packages with npm; the job summary lists them.
+
+- [ ] Every vendored package is an unmodified npm release (`node scripts/verify-vendored.mjs .` passes)
+- [ ] `vendor/` and `node_modules/` under `plugins/` are not ignored, and Git LFS is not used
 - [ ] `THIRD_PARTY_NOTICES` is at the plugin root
-- Package and version (for example `@napi-rs/keyring`):
-- sha512 per platform build (compare with npm):
-
-```
-<platform>  <sha512>
-```
 
 ## Checklist
 

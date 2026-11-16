@@ -33,17 +33,24 @@ description, and make changes in that repository.
 
 To update the plugin later, open a PR that changes `sha` (and `ref`, if you use it).
 
-## Plugins that ship `node_modules/` or native binaries
+## Plugins that ship vendored packages or native binaries
 
-Some plugins commit their built dependencies, including native `*.node` libraries. For those:
+Some plugins commit npm packages under `vendor/` or `node_modules/`, including native `*.node`
+libraries. For those:
 
-- Do not ignore `plugins/**/node_modules/` in any `.gitignore`.
+- Every vendored package must be an unmodified npm release: its `package.json` and files from its npm
+  tarball, byte for byte. A `*.node` build the package itself lacks must come unchanged from one of
+  its optional platform packages, for example `keyring.darwin-arm64.node` from
+  `@napi-rs/keyring-darwin-arm64`. You may leave files out, and add a `LICENSE`, `README` or
+  `THIRD_PARTY_NOTICES` the package lacks.
+- Packages with a `preinstall`, `install` or `postinstall` script are not accepted, and a `*.node`
+  file outside a vendored package fails.
+- CI compares every vendored package with registry.npmjs.org and lists them in the job summary. Run
+  the same check with `node scripts/verify-vendored.mjs .`.
+- Do not ignore `vendor/` or `node_modules/` under `plugins/` in any `.gitignore`.
 - Do not use Git LFS. Clones do not download LFS files, so users would get pointer files.
 - Put one `THIRD_PARTY_NOTICES` file at the plugin root. It must cover every bundled package's licence,
   the compiled libraries inside the `.node` files, and any third-party JS you bundled.
-- Reviewers cannot read binaries (the diff only says "Binary files differ"). In the PR description,
-  list each bundled native package's version and the sha512 of every platform build, so they can be
-  compared against npm.
 
 ## In the pull request
 

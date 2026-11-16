@@ -20,8 +20,9 @@ is the checklist.
 4. Run `node scripts/validate-marketplace.mjs .`.
 
 To update the plugin later, replace the folder's contents and **bump `version`**. Users only receive
-an update when it changes. If the folder is generated from another repository, say so in the PR
-description, and make changes in that repository.
+an update when it changes, and CI fails a PR that changes the folder without raising it. If the
+folder is generated from another repository, say so in the PR description, and make changes in that
+repository.
 
 ## Form 2: pin a plugin from your own repository
 
@@ -44,6 +45,25 @@ Some plugins commit their built dependencies, including native `*.node` librarie
 - Reviewers cannot read binaries (the diff only says "Binary files differ"). In the PR description,
   list each bundled native package's version and the sha512 of every platform build, so they can be
   compared against npm.
+
+## Plugin security policy
+
+Hooks and MCP servers may run files that ship inside the plugin, for example `node`, `npx` or `uvx`
+with a path inside the plugin, relative to its root. Remote MCP servers are allowed.
+
+CI rejects a hook or MCP server command that:
+
+- pipes downloaded content to a shell or interpreter (`curl … | sh`, `wget … | python3`)
+- runs downloaded content through `$(curl …)`, backticks or `<(curl …)`
+- pipes base64-decoded content to a shell or interpreter (`base64 -d … | sh`)
+- uses `sudo`
+- uses an absolute path, a path under `~` or `$HOME`, or a relative path that leaves the plugin
+
+Environment variable values are not checked, so a data folder under `~` is fine.
+
+CI lists everything a plugin can run or show the model in the pull request's job summary, so
+reviewers see it without reading the whole diff: MCP servers (with any auth block), hook commands,
+`bin/` files, app files, scripts named in skills and HTML comments in Markdown.
 
 ## In the pull request
 

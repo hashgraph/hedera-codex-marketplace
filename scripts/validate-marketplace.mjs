@@ -3,12 +3,16 @@
 // No dependencies. Identical in hedera-claude-marketplace and hedera-codex-marketplace.
 //
 //   node scripts/validate-marketplace.mjs [root] [--harness=claude|codex] [--check-remote[=true|false]]
+//     [--base=<git ref>]
 //
 // --harness defaults to whichever manifest exists under root. --check-remote also checks every
 // pinned git entry over https: its tag `ref` must resolve to `sha`, and the commit must be fetchable
-// (needs network and git).
+// (needs network and git). --base compares with that ref: an in-repo plugin whose files changed
+// must raise its version. Every run writes a Markdown summary of what each plugin runs to
+// $GITHUB_STEP_SUMMARY, or to stdout when that is unset.
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -92,8 +96,32 @@ const CODEX_POLICY = {
 const MAX_CATEGORY_LENGTH = 64;
 const CONTROL_OR_LINE_BREAK = /[\x00-\x1f\x7f-\x9f\u2028\u2029]/;
 const CODEX_DISPLAY_NAME = 'Hedera';
+/** New plugins with these name prefixes are highlighted: they read as published by Hedera. */
+const OFFICIAL_PREFIX = /^(hedera|hashgraph|hiero)-/;
+/** Hosts of the remote MCP servers this marketplace already ships. Others are highlighted, not rejected. */
+const KNOWN_MCP_HOSTS = ['payment.agent-accounts.haw.blockydevs.dev'];
+const SOURCE_FIELDS = ['source', 'repo', 'url', 'path', 'ref', 'sha'];
+// Hook, MCP, LSP and monitor commands that fail the run. Paths are checked separately
+// (findOutsidePath).
+const DOWNLOAD = String.raw`\b(curl|wget|iwr|irm|Invoke-WebRequest|Invoke-RestMethod)\b`;
+const SHELL = String.raw`\|\s*(sudo\s+)?(\S*\/)?(env\s+)?((ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php|pwsh|powershell|iex)\b`;
+const DENIED_COMMANDS = [
+  [new RegExp(String.raw`${DOWNLOAD}.*${SHELL}`, 'is'), 'pipes downloaded content to a shell or interpreter'],
+  [new RegExp(String.raw`(\$\(|<\(|\x60)\s*${DOWNLOAD}`, 'i'), 'runs downloaded content in a shell'],
+  [new RegExp(String.raw`\bbase64\s+(-[A-Za-z]*[dD][A-Za-z]*|--decode)\b.*${SHELL}`, 's'), 'pipes base64-decoded content to a shell or interpreter'],
+  [/\bsudo\b/, 'runs sudo'],
+];
+const PLUGIN_ROOT_VAR = /^(\$\{CLAUDE_PLUGIN_ROOT\}|\$CLAUDE_PLUGIN_ROOT)(?=\/|$)/;
+const HOME_PATH = /^(~|\$HOME\b|\$\{HOME\})/;
+const SKILL_SCRIPT = /[^\s`'"()<>[\]*]*\/[^\s`'"()<>[\]*]*\.(sh|bash|zsh|py|mjs|cjs|js|ts|rb|pl|ps1)(?![\w-]|\.\w)/g;
+const MARKDOWN_FILE = /\.(md|mdx|markdown)$/i;
+const HTML_COMMENT = /<!--([\s\S]*?)(-->|$)/g;
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const shorten = text => {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > 200 ? `${flat.slice(0, 200)}…` : flat;
+};
 const stripControl = value => String(value).replace(/[\x00-\x1f\x7f]/g, '');
 const codePoint = char => `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
 const utf8 = new TextDecoder('utf-8', { fatal: true });
@@ -228,6 +256,24 @@ function findGitMetadata(at, rel, content) {
       }
     });
   return [...new Set(problems)];
+}
+
+/** The root .gitattributes applies to plugins/ too, so it gets the same rules as one inside it. */
+function checkRootAttributes(root) {
+  const file = path.join(root, '.gitattributes');
+  let stats;
+  try {
+    stats = lstatSync(file);
+  } catch {
+    return [];
+  }
+  if (!stats.isFile()) return ['.gitattributes: must be a regular file'];
+  if (stats.size > MAX_FILE_BYTES) return [`.gitattributes: is larger than ${MAX_FILE_BYTES / 1024 / 1024} MB`];
+  try {
+    return findGitMetadata('.gitattributes', '.gitattributes', readFileSync(file));
+  } catch (error) {
+    return [`.gitattributes: cannot be read (${error.code ?? 'error'})`];
+  }
 }
 
 /** Gitlinks (mode 160000) under plugins/, when root is a git work tree. */
@@ -467,6 +513,10 @@ function checkLocalEntry(root, entry, harness, problem) {
     return;
   }
   const manifest = read.value;
+  if (!isObject(manifest)) {
+    problem(`${manifestPath} must be a JSON object`);
+    return;
+  }
   for (const hidden of findInvisibleStrings(manifest)) problem(`${manifestPath}: ${hidden}`);
   if (manifest.name !== entry.name) {
     problem(
@@ -478,6 +528,7 @@ function checkLocalEntry(root, entry, harness, problem) {
       `${manifestPath} needs a semver "version" (users only get updates when it changes), got ${JSON.stringify(manifest.version)}`,
     );
   }
+  return { manifestPath, manifest };
 }
 
 function checkCodexEntry(entry, problem) {
@@ -505,7 +556,11 @@ function checkCodexEntry(entry, problem) {
   }
 }
 
-function collectProblems(root, harness, checkRemote) {
+/**
+ * Collects every problem. Also fills `seen` with what later checks need: the parsed marketplace,
+ * the in-repo plugins whose manifest could be read, and the files under plugins/.
+ */
+function collectProblems(root, harness, checkRemote, seen) {
   const target = Object.hasOwn(HARNESSES, harness) ? HARNESSES[harness] : undefined;
   if (!target) return [`unknown harness "${harness}" (use claude or codex)`];
 
@@ -517,6 +572,7 @@ function collectProblems(root, harness, checkRemote) {
   if (read.error) return [read.error];
   const marketplace = read.value;
   if (!isObject(marketplace)) return [`${target.marketplacePath} must be a JSON object`];
+  seen.marketplace = marketplace;
 
   for (const hidden of findInvisibleStrings(marketplace)) problems.push(`marketplace: ${hidden}`);
   if (marketplace.name !== MARKETPLACE_NAME) {
@@ -568,7 +624,9 @@ function collectProblems(root, harness, checkRemote) {
         return problem('local source path must start with "./"');
       }
       localNames.add(entry.name);
-      return checkLocalEntry(root, entry, harness, problem);
+      const local = checkLocalEntry(root, entry, harness, problem);
+      if (local) seen.local.push({ name: entry.name, ...local });
+      return;
     }
     if (!isObject(source)) return problem('source is required');
 
@@ -595,7 +653,7 @@ function collectProblems(root, harness, checkRemote) {
     }
   }
 
-  problems.push(...findGitlinks(root));
+  problems.push(...findGitlinks(root), ...checkRootAttributes(root));
   const pluginsDir = path.join(root, 'plugins');
   let pluginsStats;
   try {
@@ -608,6 +666,7 @@ function collectProblems(root, harness, checkRemote) {
     return problems;
   }
   const { files, problems: walkProblems } = walkPlugins(pluginsDir);
+  seen.files = files;
   problems.push(...walkProblems);
   let topLevel = [];
   try {
@@ -624,12 +683,374 @@ function collectProblems(root, harness, checkRemote) {
   return problems;
 }
 
+/** Orders two semver strings by precedence, prereleases included and build metadata ignored. */
+export function compareSemver(a, b) {
+  const parse = version => {
+    const [main] = version.split('+');
+    const dash = main.indexOf('-');
+    return {
+      core: (dash < 0 ? main : main.slice(0, dash)).split('.').map(BigInt),
+      pre: dash < 0 ? [] : main.slice(dash + 1).split('.'),
+    };
+  };
+  const x = parse(a);
+  const y = parse(b);
+  for (let i = 0; i < 3; i++) if (x.core[i] !== y.core[i]) return x.core[i] < y.core[i] ? -1 : 1;
+  if (x.pre.length === 0 || y.pre.length === 0) return y.pre.length - x.pre.length;
+  for (let i = 0; i < Math.min(x.pre.length, y.pre.length); i++) {
+    const [p, q] = [x.pre[i], y.pre[i]];
+    if (p === q) continue;
+    const [pNumber, qNumber] = [/^\d+$/.test(p), /^\d+$/.test(q)];
+    if (pNumber && qNumber) return BigInt(p) < BigInt(q) ? -1 : 1;
+    if (pNumber !== qNumber) return pNumber ? -1 : 1;
+    return p < q ? -1 : 1;
+  }
+  return x.pre.length - y.pre.length;
+}
+
+/** Markdown inline code that shows `value` literally, whatever backticks it holds. */
+function code(value) {
+  const text = stripControl(typeof value === 'string' ? value : (JSON.stringify(value) ?? 'undefined'));
+  if (text.trim() === '') return `"${text}"`;
+  const fence = '`'.repeat(Math.max(0, ...(text.match(/`+/g) ?? []).map(run => run.length)) + 1);
+  return fence.length > 1 ? `${fence} ${text} ${fence}` : `\`${text}\``;
+}
+
 /**
- * Returns a list of problems; empty means the marketplace is valid. Control characters are
- * stripped from every problem, since parts of them come from the checked repo.
+ * The first part of a command that is an absolute path, a path under $HOME or ~, or a relative
+ * path that climbs out of the plugin root. ${CLAUDE_PLUGIN_ROOT} counts as the plugin root.
  */
-export function validateMarketplace(root, harness, { checkRemote = false } = {}) {
-  return collectProblems(root, harness, checkRemote).map(stripControl);
+function findOutsidePath(text) {
+  for (const token of text.split(/[\s;&|()<>`"']+/)) {
+    for (const part of [token, ...token.split('=').slice(1)]) {
+      const root = PLUGIN_ROOT_VAR.exec(part);
+      if (!root && (HOME_PATH.test(part) || (part.startsWith('/') && part !== '/dev/null'))) return part;
+      const normal = path.posix.normalize(root ? `.${part.slice(root[0].length)}` : part || '.');
+      if (normal === '..' || normal.startsWith('../')) return part;
+    }
+  }
+  return undefined;
+}
+
+/** Problems with one hook or MCP command line: the denylist, then paths outside the plugin. */
+function checkCommand(at, text) {
+  const problems = DENIED_COMMANDS.filter(([pattern]) => pattern.test(text)).map(([, what]) => `${at} ${what}`);
+  const outside = findOutsidePath(text);
+  if (outside) problems.push(`${at} uses a path outside the plugin root: ${outside}`);
+  return problems;
+}
+
+/**
+ * What an in-repo plugin can run or show the model: MCP and LSP servers, hooks, monitors, bin/
+ * files, app files, scripts named in skills, and HTML comments in Markdown. Its problems are denied
+ * commands and config files that cannot be read.
+ */
+function readCapabilities(root, { name, manifestPath, manifest }, files) {
+  const dir = `plugins/${name}`;
+  const own = files
+    .filter(file => file.rel.startsWith(`${name}/`))
+    .map(file => ({ ...file, rel: file.rel.slice(name.length + 1) }));
+  const exists = new Set(own.map(file => file.rel));
+  const problems = [];
+  const plugin = {
+    name, version: manifest.version, problems, mcp: [], lsp: [], hooks: [], monitors: [], bin: [], apps: [], scripts: [], comments: [],
+  };
+
+  // Config from the default files and from a manifest field (a path, an object, or a list of them).
+  // Monitor files hold a list, so they may be a JSON array.
+  const configs = (field, defaults, value = manifest[field], { array = false } = {}) => {
+    const found = [];
+    const read = new Set();
+    const add = rel => {
+      if (read.has(rel)) return;
+      read.add(rel);
+      const json = readJson(path.join(root, dir, rel), `${dir}/${rel}`);
+      if (json.error) problems.push(json.error);
+      else if (!isObject(json.value) && !(array && Array.isArray(json.value))) problems.push(`${dir}/${rel} must be a JSON object`);
+      else found.push({ file: rel, value: json.value });
+    };
+    for (const rel of defaults) if (exists.has(rel)) add(rel);
+    for (const item of value === undefined ? [] : Array.isArray(value) ? value : [value]) {
+      const rel = isRelativePath(item) ? path.posix.normalize(item) : undefined;
+      if (isObject(item)) found.push({ file: manifestPath, value: item });
+      else if (rel && exists.has(rel)) add(rel);
+      else problems.push(`${dir}/${manifestPath}: ${field} ${JSON.stringify(item)} is not a file in the plugin`);
+    }
+    return found;
+  };
+
+  // MCP and LSP servers: a command with args (MCP may add a cwd), or a remote url.
+  const readServers = (kind, file, servers, into) => {
+    for (const [server, config] of Object.entries(servers)) {
+      const at = `${dir}/${file}: ${kind} server ${JSON.stringify(server)}`;
+      const { command, args = [], cwd } = isObject(config) ? config : {};
+      if (
+        !isObject(config) ||
+        !['undefined', 'string'].includes(typeof command) ||
+        !['undefined', 'string'].includes(typeof cwd) ||
+        !Array.isArray(args) ||
+        !args.every(arg => typeof arg === 'string')
+      ) {
+        problems.push(`${at} must be an object whose command, args and cwd are strings`);
+        continue;
+      }
+      if (command !== undefined) problems.push(...checkCommand(at, [command, ...args].join(' ')));
+      const outsideCwd = cwd === undefined ? undefined : findOutsidePath(cwd);
+      if (outsideCwd) problems.push(`${at} uses a path outside the plugin root: ${outsideCwd}`);
+      into.push({ file, server, config });
+    }
+  };
+  for (const { file, value } of configs('mcpServers', ['.mcp.json', 'mcp.json'])) {
+    readServers('MCP', file, isObject(value.mcpServers) ? value.mcpServers : value, plugin.mcp);
+  }
+  for (const { file, value } of configs('lspServers', ['.lsp.json'])) readServers('LSP', file, value, plugin.lsp);
+
+  for (const { file, value } of configs('hooks', ['hooks/hooks.json'])) {
+    const visit = (node, at) => {
+      if (Array.isArray(node)) return node.forEach((item, index) => visit(item, `${at}[${index}]`));
+      if (!isObject(node)) return;
+      if (typeof node.command === 'string') {
+        problems.push(...checkCommand(`${dir}/${file}: hook ${at}`, node.command));
+        plugin.hooks.push({ file, at, command: node.command });
+      } else if (node.command !== undefined) {
+        problems.push(`${dir}/${file}: hook ${at} command must be a string`);
+      } else if (typeof node.url === 'string') plugin.hooks.push({ file, at, url: node.url });
+      else if (typeof node.prompt === 'string') plugin.hooks.push({ file, at, prompt: node.prompt });
+      for (const [key, child] of Object.entries(node)) visit(child, at ? `${at}.${key}` : key);
+    };
+    visit(value, '');
+  }
+
+  // Monitors run a command in the background for the whole session.
+  const monitorsValue = isObject(manifest.experimental) ? manifest.experimental.monitors : undefined;
+  for (const { file, value } of configs('monitors', ['monitors/monitors.json'], monitorsValue, { array: true })) {
+    const list = Array.isArray(value) ? value : Array.isArray(value.monitors) ? value.monitors : [value];
+    list.forEach((monitor, index) => {
+      const at = `${dir}/${file}: monitor ${JSON.stringify(isObject(monitor) && typeof monitor.name === 'string' ? monitor.name : index)}`;
+      if (!isObject(monitor) || typeof monitor.command !== 'string') return problems.push(`${at} command must be a string`);
+      problems.push(...checkCommand(at, monitor.command));
+      plugin.monitors.push({ file, name: monitor.name ?? String(index), command: monitor.command });
+    });
+  }
+
+  plugin.apps = configs('apps', ['.app.json']).map(({ file }) => file);
+  plugin.bin = own.filter(({ rel }) => rel.startsWith('bin/')).map(({ rel }) => rel);
+
+  for (const { rel, full, size } of own) {
+    const isSkill = path.posix.basename(rel) === 'SKILL.md';
+    if ((!isSkill && !MARKDOWN_FILE.test(rel)) || size > MAX_FILE_BYTES) continue;
+    let text;
+    try {
+      text = readFileSync(full, 'utf8');
+    } catch {
+      continue; // checkPluginFiles already reported it.
+    }
+    if (isSkill) {
+      for (const ref of new Set(text.match(SKILL_SCRIPT) ?? [])) {
+        if (!ref.includes('://')) plugin.scripts.push({ file: rel, ref });
+      }
+    }
+    for (const match of text.matchAll(HTML_COMMENT)) {
+      plugin.comments.push({ file: rel, line: text.slice(0, match.index).split('\n').length, text: shorten(match[1]) });
+    }
+  }
+  return plugin;
+}
+
+/** The fields of an entry's source that select what gets installed. A string source is local. */
+const sourceFields = source =>
+  typeof source === 'string' ? { source: 'local', path: source } : isObject(source) ? source : {};
+
+const fieldChanges = (before, after, keys) =>
+  keys
+    .filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key]))
+    .map(key => `${key} ${before[key] === undefined ? 'unset' : code(before[key])} → ${after[key] === undefined ? 'unset' : code(after[key])}`);
+
+/**
+ * Compares the working tree with commit `base`. In-repo plugins whose files changed must raise
+ * their semver version. New, removed and re-pointed entries, and Codex policy changes, are
+ * reported for the summary but do not fail.
+ */
+function compareWithBase(root, harness, base, { marketplace, local }) {
+  const { marketplacePath, manifestPaths } = HARNESSES[harness];
+  const git = args =>
+    execFileSync('git', args, {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      maxBuffer: 256 * 1024 * 1024,
+    });
+  let commit;
+  try {
+    if (base.startsWith('-')) throw new Error('not a ref');
+    commit = git(['rev-parse', '--verify', '--quiet', `${base}^{commit}`]).trim();
+  } catch {
+    return { problems: [`--base: "${base}" is not a commit in this repository`] };
+  }
+  const atBase = rel => {
+    try {
+      return git(['cat-file', 'blob', `${commit}:./${rel}`]);
+    } catch {
+      return undefined;
+    }
+  };
+  let changedPaths;
+  try {
+    changedPaths = [
+      ...git(['diff', '--relative', '--name-only', '--no-renames', '-z', commit, '--', 'plugins']).split('\0'),
+      ...git(['ls-files', '--others', '--exclude-standard', '-z', '--', 'plugins']).split('\0'),
+    ];
+  } catch {
+    return { problems: [`--base: cannot compare plugins/ with ${base}`] };
+  }
+  const changed = new Set(changedPaths.filter(Boolean).map(rel => rel.split('/')[1]));
+
+  const problems = [];
+  const highlights = [];
+  const changes = [];
+  let baseMarketplace = {};
+  const baseText = atBase(marketplacePath);
+  if (baseText !== undefined) {
+    try {
+      baseMarketplace = JSON.parse(baseText);
+    } catch {
+      problems.push(`--base: ${marketplacePath} in ${base} is not valid JSON`);
+    }
+  }
+  const byName = list =>
+    new Map((Array.isArray(list) ? list : []).filter(entry => isObject(entry) && typeof entry.name === 'string').map(entry => [entry.name, entry]));
+  const before = byName(baseMarketplace?.plugins);
+  const after = byName(marketplace.plugins);
+
+  for (const [name, entry] of after) {
+    const old = before.get(name);
+    if (!old) {
+      changes.push(`New plugin ${code(name)}`);
+      if (OFFICIAL_PREFIX.test(name)) {
+        highlights.push(`New plugin ${code(name)} has a name that reads as published by Hedera`);
+      }
+      continue;
+    }
+    const sourceDiff = fieldChanges(sourceFields(old.source), sourceFields(entry.source), SOURCE_FIELDS);
+    if (sourceDiff.length > 0) highlights.push(`${code(name)} source changed: ${sourceDiff.join(', ')}`);
+    if (harness === 'codex') {
+      const [oldPolicy, newPolicy] = [old.policy, entry.policy].map(policy => (isObject(policy) ? policy : {}));
+      const keys = [...new Set([...Object.keys(oldPolicy), ...Object.keys(newPolicy)])].sort();
+      const policyDiff = fieldChanges(oldPolicy, newPolicy, keys);
+      if (policyDiff.length > 0) highlights.push(`${code(name)} policy changed: ${policyDiff.join(', ')}`);
+    }
+  }
+  for (const name of before.keys()) if (!after.has(name)) changes.push(`Removed plugin ${code(name)}`);
+
+  for (const { name, manifest } of local) {
+    const { version } = manifest;
+    if (!changed.has(name) || typeof version !== 'string' || !SEMVER.test(version)) continue;
+    let baseVersion;
+    for (const rel of manifestPaths) {
+      const text = atBase(`plugins/${name}/${rel}`);
+      if (text === undefined) continue;
+      try {
+        baseVersion = JSON.parse(text)?.version;
+      } catch {
+        // An unreadable earlier manifest leaves nothing to compare with.
+      }
+      break;
+    }
+    if (typeof baseVersion !== 'string' || !SEMVER.test(baseVersion)) continue;
+    const order = compareSemver(version, baseVersion);
+    if (order > 0) changes.push(`${code(name)} version ${code(baseVersion)} → ${code(version)}`);
+    else if (order < 0) problems.push(`plugins/${name}: version went down from ${baseVersion} in ${base} to ${version}`);
+    else problems.push(`plugins/${name}: files changed since ${base}, so "version" must be greater than ${baseVersion}`);
+  }
+  return { problems, highlights, changes, changed };
+}
+
+function renderPlugin({ name, version, mcp, lsp, hooks, monitors, bin, apps, scripts, comments }) {
+  const list = (label, items) =>
+    items.length > 0 ? [`- ${label}:`, ...items.map(item => `  - ${item}`)] : [`- ${label}: none`];
+  const server = ({ file, server: serverName, config }) => {
+    const parts = ['type', 'transport', 'command', 'args', 'url', 'cwd']
+      .filter(key => config[key] !== undefined && config[key].length !== 0)
+      .map(key => `${key} ${key === 'args' ? config.args.map(code).join(' ') : code(config[key])}`);
+    for (const key of ['env', 'headers']) {
+      if (isObject(config[key])) parts.push(`${key} keys ${Object.keys(config[key]).map(code).join(', ') || 'none'}`);
+    }
+    for (const key of ['auth', 'oauth']) if (config[key] !== undefined) parts.push(`${key} ${code(config[key])}`);
+    return `${code(serverName)} in ${code(file)}: ${parts.join(', ') || 'no command or url'}`;
+  };
+  return [
+    `### ${code(name)} ${code(version)}`,
+    '',
+    ...list('MCP servers', mcp.map(server)),
+    ...(lsp.length > 0 ? list('LSP servers', lsp.map(server)) : []),
+    ...list(
+      'Hooks',
+      hooks.map(hook => {
+        const what =
+          hook.command !== undefined ? `command ${code(hook.command)}`
+          : hook.url !== undefined ? `url ${code(hook.url)}`
+          : `prompt ${code(shorten(hook.prompt))}`;
+        return `${code(hook.at)} in ${code(hook.file)}: ${what}`;
+      }),
+    ),
+    ...(monitors.length > 0
+      ? list('Monitors', monitors.map(monitor => `${code(monitor.name)} in ${code(monitor.file)}: command ${code(monitor.command)}`))
+      : []),
+    ...list('Files in bin/', bin.map(code)),
+    ...(apps.length > 0 ? list('App files', apps.map(code)) : []),
+    ...list('Scripts named in skills', scripts.map(({ file, ref }) => `${code(ref)} in ${code(file)}`)),
+    ...list('HTML comments in Markdown', comments.map(({ file, line, text }) => `${code(file)} line ${line}: ${code(text)}`)),
+  ];
+}
+
+/** The Markdown summary for reviewers. It never fails the run: failures are problems. */
+function renderSummary(base, diff, plugins) {
+  const highlights = [...(diff?.highlights ?? [])];
+  for (const { name, mcp } of plugins) {
+    for (const { server, config } of mcp) {
+      if (typeof config.url !== 'string') continue;
+      let host;
+      try {
+        host = new URL(config.url).hostname;
+      } catch {
+        // Shown as the raw url below.
+      }
+      if (!KNOWN_MCP_HOSTS.includes(host)) {
+        highlights.push(`${code(name)} MCP server ${code(server)} connects to ${code(host ?? config.url)}, which is not a known host`);
+      }
+    }
+  }
+  const lines = ['## Marketplace summary', ''];
+  if (diff?.changed) lines.push(`Compared with ${code(base)}: only in-repo plugins with changed files are listed.`, '');
+  else lines.push('Every in-repo plugin is listed.', '');
+  if (highlights.length > 0) {
+    lines.push('> [!WARNING]', '> Check these before approving:', ...highlights.map(line => `> - ${line}`), '');
+  }
+  if (diff?.changes?.length > 0) lines.push(...diff.changes.map(line => `- ${line}`), '');
+  if (plugins.length === 0) lines.push('No in-repo plugins to list.', '');
+  for (const plugin of plugins) lines.push(...renderPlugin(plugin), '');
+  return lines.join('\n');
+}
+
+/**
+ * Validates the marketplace and builds the reviewer summary. With `base` (a git ref), also checks
+ * version bumps against it and lists only the plugins that changed. Control characters are stripped
+ * from every problem, since parts of them come from the checked repo.
+ */
+export function inspectMarketplace(root, harness, { checkRemote = false, base } = {}) {
+  const seen = { marketplace: undefined, local: [], files: [] };
+  const problems = collectProblems(root, harness, checkRemote, seen);
+  const plugins = seen.local.map(plugin => readCapabilities(root, plugin, seen.files));
+  for (const plugin of plugins) problems.push(...plugin.problems);
+  const diff = base !== undefined && seen.marketplace ? compareWithBase(root, harness, base, seen) : undefined;
+  if (diff) problems.push(...diff.problems);
+  const listed = diff?.changed ? plugins.filter(({ name }) => diff.changed.has(name)) : plugins;
+  return { problems: problems.map(stripControl), summary: renderSummary(base, diff, listed) };
+}
+
+/** Returns a list of problems; empty means the marketplace is valid. */
+export function validateMarketplace(root, harness, options) {
+  return inspectMarketplace(root, harness, options).problems;
 }
 
 export function parseArgs(argv) {
@@ -644,6 +1065,10 @@ export function parseArgs(argv) {
     throw new Error(`--check-remote takes true or false, got "${remote}"`);
   }
   parsed['check-remote'] = remote === true || remote === 'true';
+  const { base } = parsed;
+  if (base !== undefined && (typeof base !== 'string' || base === '' || base.startsWith('-'))) {
+    throw new Error('--base takes a git ref, like --base=origin/main');
+  }
   return parsed;
 }
 
@@ -663,7 +1088,12 @@ function main() {
     console.error('No marketplace manifest found; pass --harness=claude|codex.');
     process.exit(1);
   }
-  const problems = validateMarketplace(root, harness, { checkRemote: args['check-remote'] });
+  const { problems, summary } = inspectMarketplace(root, harness, {
+    checkRemote: args['check-remote'],
+    base: args.base,
+  });
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+  else console.log(summary);
   if (problems.length > 0) {
     console.error(`${problems.length} problem(s) in ${HARNESSES[harness]?.marketplacePath ?? stripControl(harness)}:`);
     for (const problem of problems) console.error(`  - ${problem}`);

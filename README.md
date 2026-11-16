@@ -83,14 +83,25 @@ Details are in the
 - An in-repo entry points at `./plugins/<name>`, that folder exists, and it has one manifest (not
   both) with the same `name` and a semver `version`.
 - Files under `plugins/` include no symlinks, submodules, `.gitattributes` drivers or invisible
-  Unicode characters, and none is over 16 MB.
+  Unicode characters, and none is over 16 MB. The root `.gitattributes` sets no drivers either.
 - A pinned git entry uses an `https://github.com/<owner>/<repo>` URL, a relative `path`, a tag
   `ref` and a full `sha`. With `--check-remote`, the tag must resolve to exactly that commit in the
   upstream repository.
 - Every folder in `plugins/` has an entry, and no folder holds key material, `.env` files or a
   keystore.
+- On a pull request (`--base=origin/main`), an in-repo plugin whose files changed must raise its
+  `version` in semver order, so a version never goes down.
+- Hook and MCP server commands don't run downloaded or base64-decoded content in a shell or
+  interpreter, don't use `sudo`, and use no path outside the plugin (see the plugin security
+  policy in [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-Run it locally with `node scripts/validate-marketplace.mjs . --check-remote`.
+The job summary lists what each changed plugin runs: MCP servers (with any auth block), hook
+commands, `bin/` files, app files, scripts named in skills and HTML comments in Markdown. It
+highlights a new plugin named `hedera-`, `hashgraph-` or `hiero-`, a changed source or `policy` on
+an existing entry, and a remote MCP server on a host the marketplace doesn't already use. These
+don't fail the run; reviewers check them.
+
+Run it locally with `node scripts/validate-marketplace.mjs . --check-remote --base=origin/main`.
 
 ## Review
 

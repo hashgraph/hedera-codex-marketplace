@@ -458,6 +458,33 @@ for (const harness of ['claude', 'codex']) {
       assert.doesNotMatch(output, /line [12] /);
     });
 
+    test('rejects git attribute drivers in the root .gitattributes, which also applies to plugins/', () => {
+      const root = makeRepo(harness, { plugins: [localEntry[harness]('demo')], dirs: { demo: '1.0.0' } });
+      write(root, '.gitattributes', '# filter=ok\n*.sh text eol=lf\nplugins/** filter=evil\n*.md diff=md\n*.json merge=ours\nplugins/demo/x export-ignore\n');
+      const output = validate(root);
+      assert.match(output.join('\n'), /^\.gitattributes: line 3 sets filter=evil/m);
+      assert.match(output.join('\n'), /^\.gitattributes: line 4 sets diff=md/m);
+      assert.match(output.join('\n'), /^\.gitattributes: line 5 sets merge=ours/m);
+      assert.match(output.join('\n'), /^\.gitattributes: line 6 sets export-ignore/m);
+      assert.equal(output.length, 4, output.join('\n'));
+      write(root, '.gitattributes', '*.node filter=lfs diff=lfs merge=lfs -text\n');
+      assert.match(validate(root).join('\n'), /^\.gitattributes: Git LFS is not supported/m);
+    });
+
+    test('a harmless root .gitattributes passes', () => {
+      const root = makeRepo(harness, { plugins: [localEntry[harness]('demo')], dirs: { demo: '1.0.0' } });
+      write(root, '.gitattributes', '* text=auto\n*.sh text eol=lf\n*.node binary\n');
+      assert.deepEqual(validate(root), []);
+    });
+
+    test('a plugin manifest that is not a JSON object is a problem, not a crash', () => {
+      for (const json of ['null', '[]', '"demo"', '5']) {
+        const root = makeRepo(harness, { plugins: [localEntry[harness]('demo')] });
+        write(root, `plugins/demo/${manifestPath}`, `${json}\n`);
+        assert.match(validate(root).join('\n'), new RegExp(`${manifestPath.replace('.', '\\.')} must be a JSON object`), json);
+      }
+    });
+
     test('rejects gitlinks under plugins/ in a git work tree', () => {
       const root = makeRepo(harness, { plugins: [localEntry[harness]('demo')], dirs: { demo: '1.0.0' } });
       const git = (...args) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
@@ -572,6 +599,18 @@ for (const harness of ['claude', 'codex']) {
           summary,
           /^> - `demo` source changed: url `https:\/\/github\.com\/acme\/demo\.git` → `https:\/\/github\.com\/evil\/demo\.git`, ref `v1\.2\.0` → `v1\.3\.0`, sha `a{40}` → `b{40}`$/m,
         );
+      });
+
+      test('an earlier marketplace or plugin manifest that is not a JSON object does not crash', () => {
+        const root = committed();
+        write(root, HARNESSES[harness].marketplacePath, 'null\n');
+        write(root, `plugins/demo/${manifestPath}`, 'null\n');
+        commitAll(root);
+        write(root, HARNESSES[harness].marketplacePath, { ...BASE[harness], plugins: [localEntry[harness]('demo')] });
+        setVersion(root, '1.0.0');
+        const { problems, summary } = inspect(root, { base: 'HEAD' });
+        assert.deepEqual(problems, []);
+        assert.match(summary, /^- New plugin `demo`$/m);
       });
 
       test('a --base that is not a commit is a problem', () => {

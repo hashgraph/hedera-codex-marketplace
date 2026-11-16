@@ -234,6 +234,24 @@ function findGitMetadata(at, rel, content) {
   return [...new Set(problems)];
 }
 
+/** The root .gitattributes applies to plugins/ too, so it gets the same rules as one inside it. */
+function checkRootAttributes(root) {
+  const file = path.join(root, '.gitattributes');
+  let stats;
+  try {
+    stats = lstatSync(file);
+  } catch {
+    return [];
+  }
+  if (!stats.isFile()) return ['.gitattributes: must be a regular file'];
+  if (stats.size > MAX_FILE_BYTES) return [`.gitattributes: is larger than ${MAX_FILE_BYTES / 1024 / 1024} MB`];
+  try {
+    return findGitMetadata('.gitattributes', '.gitattributes', readFileSync(file));
+  } catch (error) {
+    return [`.gitattributes: cannot be read (${error.code ?? 'error'})`];
+  }
+}
+
 /** Gitlinks (mode 160000) under plugins/, when root is a git work tree. */
 function findGitlinks(root) {
   let listing;
@@ -471,6 +489,10 @@ function checkLocalEntry(root, entry, harness, problem) {
     return;
   }
   const manifest = read.value;
+  if (!isObject(manifest)) {
+    problem(`${manifestPath} must be a JSON object`);
+    return;
+  }
   for (const hidden of findInvisibleStrings(manifest)) problem(`${manifestPath}: ${hidden}`);
   if (manifest.name !== entry.name) {
     problem(
@@ -602,7 +624,7 @@ function collectProblems(root, harness, checkRemote, seen) {
     }
   }
 
-  problems.push(...findGitlinks(root));
+  problems.push(...findGitlinks(root), ...checkRootAttributes(root));
   const pluginsDir = path.join(root, 'plugins');
   let pluginsStats;
   try {

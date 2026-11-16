@@ -82,7 +82,7 @@ Details are in the
 - An in-repo entry points at `./plugins/<name>`, that folder exists, and it has one manifest (not
   both) with the same `name` and a semver `version`.
 - Files under `plugins/` include no symlinks, submodules, `.gitattributes` drivers or invisible
-  Unicode characters, and none is over 16 MB.
+  Unicode characters, and none is over 16 MB. The root `.gitattributes` sets no drivers either.
 - A pinned git entry uses an `https://github.com/<owner>/<repo>` URL, a relative `path`, a tag
   `ref` and a full `sha`. With `--check-remote`, the tag must resolve to exactly that commit in the
   upstream repository.

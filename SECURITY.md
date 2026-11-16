@@ -8,9 +8,9 @@ malicious or compromised plugin the same way. Don't open a public issue or pull 
 
 ## What a listing means
 
-Maintainers review every change to this repository (see [CODEOWNERS](.github/CODEOWNERS)). CI
-checks what the README lists under [What CI checks](README.md#what-ci-checks). A listing isn't a
-security audit of the plugin.
+Every change to this repository needs an approving review in a pull request. CI checks what the
+README lists under [What CI checks](README.md#what-ci-checks). A listing isn't a security audit of
+the plugin.
 
 ## Withdraw a plugin
 
@@ -34,4 +34,5 @@ codex plugin remove <plugin>@hedera
 
 ## Response time
 
-TODO(maintainers): agree a target time for the first response to a report.
+Reports are acknowledged under the Hashgraph security policy. Once a listed plugin is confirmed
+malicious or compromised, maintainers merge the withdrawn stub (step 1 above) within 1 working day.

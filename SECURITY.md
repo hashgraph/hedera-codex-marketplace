@@ -22,10 +22,11 @@ When a listed plugin is malicious or compromised, maintainers withdraw it in thi
 3. Once the stub has been out long enough, remove the plugin's entry from
    `.agents/plugins/marketplace.json`.
 
-## Removing an entry doesn't uninstall the plugin
+## Copies users already installed
 
-Removing or replacing an entry doesn't touch copies already installed in `~/.codex/plugins/cache/`.
-Users who installed the plugin must remove it themselves:
+Codex has no way for a marketplace to remove a plugin from users' machines, so the stub in step 1 is
+the main protection. Removing or replacing an entry doesn't touch copies already installed in
+`~/.codex/plugins/cache/`. Users who installed the plugin must remove it themselves:
 
 ```bash
 codex plugin remove <plugin>@hedera

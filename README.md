@@ -89,8 +89,8 @@ Run it locally with `node scripts/validate-marketplace.mjs . --check-remote`.
 
 ## Review
 
-Maintainers approve every change through [CODEOWNERS](.github/CODEOWNERS). Sign off every commit for
-the DCO (`git commit -s`). Pull request titles must follow
+Every change needs an approving review in a pull request. Sign off every commit for the DCO
+(`git commit -s`). Pull request titles must follow
 [Conventional Commits](https://www.conventionalcommits.org/).
 
 ## Security

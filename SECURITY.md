@@ -31,8 +31,3 @@ the main protection. Removing or replacing an entry doesn't touch copies already
 ```bash
 codex plugin remove <plugin>@hedera
 ```
-
-## Response time
-
-Reports are acknowledged under the Hashgraph security policy. Once a listed plugin is confirmed
-malicious or compromised, maintainers merge the withdrawn stub (step 1 above) within 1 working day.

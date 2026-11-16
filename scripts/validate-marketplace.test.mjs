@@ -431,6 +431,31 @@ for (const harness of ['claude', 'codex']) {
       assert.doesNotMatch(output, /bom\.md/);
     });
 
+    test('an invalid byte does not hide invisible Unicode in text a model may read', () => {
+      const root = makeRepo(harness, { plugins: [localEntry[harness]('demo')], dirs: { demo: '1.0.0' } });
+      const hidden = text => Buffer.concat([Buffer.from(`${text}${String.fromCodePoint(0xe0049)}\n`), Buffer.from([0xff])]);
+      write(root, 'plugins/demo/skills/pay/reference.mdx', hidden('# Ref'));
+      write(root, 'plugins/demo/scripts/run.py', hidden('# run'));
+      write(root, 'plugins/demo/bin/tool', hidden('#!/bin/sh\n# tool'));
+      const output = validate(root).join('\n');
+      for (const file of ['skills/pay/reference.mdx', 'scripts/run.py', 'bin/tool']) {
+        assert.match(output, new RegExp(`plugins/demo/${file}: contains invisible Unicode U\\+E0049`), file);
+      }
+    });
+
+    test('rejects the Arabic letter mark, supplementary variation selectors and runs of selectors', () => {
+      const root = makeRepo(harness, { plugins: [localEntry[harness]('demo')], dirs: { demo: '1.0.0' } });
+      write(root, 'plugins/demo/a.md', 'mark \u061c here');
+      write(root, 'plugins/demo/b.md', `smuggled a${String.fromCodePoint(0xe0100, 0xe0101)}`);
+      write(root, 'plugins/demo/c.md', 'smuggled a\ufe01\ufe0f');
+      write(root, 'plugins/demo/emoji.md', 'Warning \u26a0\ufe0f and \u2764\ufe0e are fine.\n');
+      const output = validate(root).join('\n');
+      assert.match(output, /plugins\/demo\/a\.md: contains invisible Unicode U\+061C/);
+      assert.match(output, /plugins\/demo\/b\.md: contains invisible Unicode U\+E0100/);
+      assert.match(output, /plugins\/demo\/c\.md: contains invisible Unicode U\+FE01/);
+      assert.doesNotMatch(output, /emoji\.md/);
+    });
+
     test('rejects invisible Unicode in manifest strings, escaped or not', () => {
       const entry = { ...localEntry[harness]('demo'), description: 'Pays\u200b invoices.' };
       const root = makeRepo(harness, {
@@ -443,6 +468,17 @@ for (const harness of ['claude', 'codex']) {
       assert.match(output, /marketplace: description contains invisible Unicode U\+202E/);
       assert.match(output, /marketplace: plugins\[0\]\.description contains invisible Unicode U\+200B/);
       assert.match(output, /plugin\.json: description contains invisible Unicode U\+2063/);
+    });
+
+    test('rejects invisible Unicode in manifest keys', () => {
+      const root = makeRepo(harness, {
+        dirs: { demo: '1.0.0' },
+        plugins: [localEntry[harness]('demo')],
+        marketplace: { metadata: { 'note\u200b': 'x' }, 'extra\u202e': true },
+      });
+      const output = validate(root).join('\n');
+      assert.match(output, /marketplace: a key in metadata contains invisible Unicode U\+200B/);
+      assert.match(output, /marketplace: a top-level key contains invisible Unicode U\+202E/);
     });
 
     test('rejects .gitmodules and git attribute drivers under plugins/', () => {

@@ -9,6 +9,7 @@ is the checklist.
 - Your plugin works when installed in Codex from a local marketplace.
 - It has a README and a LICENSE, and contains no secrets, `.env` files, key files or keystores.
 - Everything in it is meant to be public. This repository is.
+- To report a vulnerability or a malicious plugin, don't open a PR: follow [SECURITY.md](SECURITY.md).
 
 ## Form 1: add the plugin to this repository
 

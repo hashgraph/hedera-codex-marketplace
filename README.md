@@ -19,6 +19,12 @@ To pick up new releases:
 codex plugin marketplace upgrade hedera
 ```
 
+When you want a fixed version, pin a release tag when you add the marketplace:
+
+```bash
+codex plugin marketplace add hashgraph/hedera-codex-marketplace --ref <tag>
+```
+
 Codex CLI, Codex Desktop and the ChatGPT Desktop Work tab share the same local configuration, so
 installing once makes the plugin available in all of them.
 
@@ -76,13 +82,18 @@ that changes `sha`. Details are in the
 - An in-repo entry points at `./plugins/<name>`, that folder exists, and its manifest has the same
   `name` and a semver `version`.
 - A pinned git entry uses `https://` and a full `sha` that can be fetched.
-- Every folder in `plugins/` has an entry, and no folder holds key material, `.env` files or a
-  keystore.
+- Every folder in `plugins/` has an entry and is checked for key material, `.env` files and
+  keystores.
 
 Run it locally with `node scripts/validate-marketplace.mjs . --check-remote`.
 
 ## Review
 
-Maintainers approve every change through [CODEOWNERS](.github/CODEOWNERS). Sign off every commit for
-the DCO (`git commit -s`). Pull request titles must follow
+Every change needs an approving review in a pull request. Sign off every commit for the DCO
+(`git commit -s`). Pull request titles must follow
 [Conventional Commits](https://www.conventionalcommits.org/).
+
+## Security
+
+To report a vulnerability or a malicious plugin, and to see how a plugin is withdrawn, read
+[SECURITY.md](SECURITY.md).

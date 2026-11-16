@@ -71,11 +71,17 @@ that changes `sha`. Details are in the
 
 `scripts/validate-marketplace.mjs` runs on every pull request:
 
-- The marketplace is named `hedera` and has a display name.
-- Plugin names are valid and unique, and every entry has `policy` and `category`.
-- An in-repo entry points at `./plugins/<name>`, that folder exists, and its manifest has the same
-  `name` and a semver `version`.
-- A pinned git entry uses `https://` and a full `sha` that can be fetched.
+- The marketplace is named `hedera` and its display name is `Hedera`.
+- Plugin names are lowercase kebab-case, at most 64 characters, unique, and not reserved (such as
+  `node_modules`).
+- Every entry has a `policy` and a `category`. `installation` is `AVAILABLE` or `NOT_AVAILABLE`,
+  `authentication` is `ON_INSTALL` or `ON_USE`, and `category` is `Developer Tools` or `Productivity`.
+- An in-repo entry points at `./plugins/<name>`, that folder exists, and it has one manifest (not
+  both) with the same `name` and a semver `version`.
+- Files under `plugins/` include no symlinks, submodules, `.gitattributes` drivers or invisible
+  Unicode characters, and none is over 16 MB.
+- A pinned git entry uses an `https://github.com/<owner>/<repo>` URL, a relative `path` and a
+  full `sha` that can be fetched.
 - Every folder in `plugins/` has an entry, and no folder holds key material, `.env` files or a
   keystore.
 

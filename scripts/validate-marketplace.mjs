@@ -8,15 +8,12 @@
 // pinned git commit over https, to prove it exists and is public (needs network and git).
 import { execFileSync } from 'node:child_process';
 import {
-  closeSync,
   existsSync,
+  lstatSync,
   mkdtempSync,
-  openSync,
   readFileSync,
-  readSync,
   readdirSync,
   rmSync,
-  statSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -29,106 +26,304 @@ export const HARNESSES = {
     marketplacePath: '.claude-plugin/marketplace.json',
     manifestPaths: ['.claude-plugin/plugin.json'],
     gitSourceTypes: ['github', 'url', 'git-subdir'],
+    // Listing fields only. Claude Code also merges components (hooks, commands, agents, skills, MCP
+    // servers, ...) from an entry into the plugin, out of sight of the plugin checks, so they must
+    // live in the plugin's own files.
+    entryFields: [
+      'name', 'source', 'description', 'version', 'author', 'homepage', 'repository', 'license',
+      'keywords', 'category', 'tags', 'displayName',
+    ],
   },
   codex: {
     marketplacePath: '.agents/plugins/marketplace.json',
     manifestPaths: ['.codex-plugin/plugin.json', 'plugin.json'],
     gitSourceTypes: ['url', 'git-subdir'],
+    entryFields: ['name', 'source', 'description', 'policy', 'category'],
   },
 };
 
-const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+/** Limits on what the validator reads, so a hostile tree fails instead of exhausting the runner. */
+export const MAX_FILES = 10_000;
+export const MAX_FILE_BYTES = 16 * 1024 * 1024;
+export const MAX_REMOTE_CHECKS = 50;
+
+const NAME = /^[a-z0-9]+(-[a-z0-9]+)*$/;
+const MAX_NAME_LENGTH = 64;
+const RESERVED_NAMES = new Set(['node_modules', 'plugins', 'scripts', '.claude-plugin', '.codex-plugin']);
+const REPO_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA = /^[0-9a-f]{40}$/;
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
-const FORBIDDEN_FILE =
-  /(^|\/)(\.env(\..*)?|.*\.pem|.*\.p12|id_rsa|id_ed25519)$|(^|\/)keystore(\/|$)/i;
-const PRIVATE_KEY_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+const FORBIDDEN_FILE = new RegExp(
+  '(^|/)(\\.env(\\..*)?|.*\\.(pem|p12|key|pfx|jks|p8|ppk)|\\.npmrc|\\.netrc|\\.pypirc|credentials(\\.json)?' +
+    '|id_(rsa|dsa|ecdsa|ecdsa_sk|ed25519|ed25519_sk))$|(^|/)keystore(/|$)',
+  'i',
+);
+// Full token shapes, not bare prefixes, so bundled library code that names a prefix doesn't match.
+const SECRETS = [
+  [/-----BEGIN [A-Z ]*PRIVATE KEY-----/, 'a private key block'],
+  [/302e020100300506032b657004220420[0-9a-f]{64}/i, 'a Hedera ED25519 private key (DER hex)'],
+  [/3030020100300706052b8104000a04220420[0-9a-f]{64}/i, 'a Hedera ECDSA private key (DER hex)'],
+  [/sk-ant-[a-z]+\d{2}-[A-Za-z0-9_-]{80,}/, 'an Anthropic API key'],
+  [/sk-proj-[A-Za-z0-9_-]{100,}/, 'an OpenAI API key'],
+  [/(?<![A-Za-z0-9_])ghp_[A-Za-z0-9]{36}(?![A-Za-z0-9])/, 'a GitHub token'],
+  [/(?<![A-Za-z0-9_])github_pat_[A-Za-z0-9_]{82}(?![A-Za-z0-9_])/, 'a GitHub token'],
+  [/(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])/, 'an AWS access key'],
+  [/xox[bp]-\d{10,13}-\d{10,13}-[A-Za-z0-9-]{24,}/, 'a Slack token'],
+];
+// Unicode format characters that render as nothing or reorder text: soft hyphen, the Arabic letter
+// mark, zero-width and bidi controls, word joiners, BOM, tag characters and the supplementary
+// variation selectors. U+FE00-FE0F may follow a character once (emoji use U+FE0F); a run of them
+// can carry hidden text.
+const INVISIBLE =
+  /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]|[\uFE00-\uFE0F]{2,}/u;
+const TEXT_FILE =
+  /(^|\/)\.[^/]+$|\.(md|mdx|markdown|rst|txt|json|jsonc|js|mjs|cjs|jsx|ts|mts|cts|tsx|yml|yaml|toml|ini|cfg|conf|sh|bash|zsh|fish|ps1|bat|cmd|py|rb|pl|php|lua|sql|html|htm|xml|svg|css|csv|tsv)$/i;
 const LFS_POINTER = 'version https://git-lfs.github.com/spec/';
-const LFS_ATTRIBUTE = /(^|\s)filter=lfs(\s|$)/m;
+const LFS_ATTRIBUTE = /(^|\s)filter=lfs(\s|$)/;
+const DRIVER_ATTRIBUTE = /(?:^|\s)((?:filter|diff|merge)=\S*|export-ignore(?=\s|$))/;
 const NOTICES_FILE = /^THIRD_PARTY_NOTICES(\..+)?$/i;
+const CODEX_POLICY = {
+  installation: ['AVAILABLE', 'NOT_AVAILABLE'],
+  authentication: ['ON_INSTALL', 'ON_USE'],
+};
+const MAX_CATEGORY_LENGTH = 64;
+const CONTROL_OR_LINE_BREAK = /[\x00-\x1f\x7f-\x9f\u2028\u2029]/;
+const CODEX_DISPLAY_NAME = 'Hedera';
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const stripControl = value => String(value).replace(/[\x00-\x1f\x7f]/g, '');
+const codePoint = char => `U+${char.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
+const utf8 = new TextDecoder('utf-8', { fatal: true });
 
-function readJson(file) {
-  return JSON.parse(readFileSync(file, 'utf8'));
+/** Parses a JSON file that must be a regular file (not a symlink). Returns { value } or { error }. */
+function readJson(file, rel) {
+  try {
+    if (!lstatSync(file).isFile()) return { error: `${rel} must be a regular file` };
+    return { value: JSON.parse(readFileSync(file, 'utf8')) };
+  } catch (error) {
+    if (error instanceof SyntaxError) return { error: `${rel} is not valid JSON (${error.message})` };
+    return { error: `${rel} cannot be read (${error.code ?? 'error'})` };
+  }
 }
 
-function walk(dir) {
-  const files = [];
-  const visit = current => {
-    for (const entry of readdirSync(current).sort()) {
-      const full = path.join(current, entry);
-      if (statSync(full).isDirectory()) visit(full);
-      else files.push(full);
-    }
-  };
-  visit(dir);
-  return files;
-}
-
-function isBinary(buffer) {
-  return buffer.subarray(0, 8192).includes(0);
+/** Every string in a parsed manifest that holds an invisible character, as "<key path> contains ...". */
+function findInvisibleStrings(value, at = '') {
+  if (typeof value === 'string') {
+    const match = INVISIBLE.exec(value);
+    return match ? [`${at || 'value'} contains invisible Unicode ${codePoint(match[0])}`] : [];
+  }
+  const problems = [];
+  for (const key of isObject(value) ? Object.keys(value) : []) {
+    const match = INVISIBLE.exec(key);
+    if (match) problems.push(`${at ? `a key in ${at}` : 'a top-level key'} contains invisible Unicode ${codePoint(match[0])}`);
+  }
+  const children = Array.isArray(value)
+    ? value.map((item, index) => [`${at}[${index}]`, item])
+    : isObject(value)
+      ? Object.entries(value).map(([key, item]) => [at ? `${at}.${key}` : key, item])
+      : [];
+  return [...problems, ...children.flatMap(([childAt, item]) => findInvisibleStrings(item, childAt))];
 }
 
 /**
- * Local state or key material anywhere under plugins/ (repos are public). Vendored node_modules/
- * is shipped as-is: its file names are still checked, but its third-party JS is not content-scanned.
- * Every other file is content-scanned whatever its extension; binaries (a NUL byte early on) are skipped.
+ * Lists the regular files under plugins/ without following symlinks. Symlinks, special files,
+ * unreadable folders and a tree over MAX_FILES are problems, never exceptions.
  */
-function findSecrets(pluginsDir) {
+function walkPlugins(pluginsDir) {
+  const files = [];
   const problems = [];
-  for (const file of walk(pluginsDir)) {
-    const rel = path.relative(pluginsDir, file).split(path.sep).join('/');
-    const vendored = rel.split('/').includes('node_modules');
-    if (FORBIDDEN_FILE.test(rel)) problems.push(`plugins/${rel}: local state or key file`);
-    else if (!vendored) {
-      const content = readFileSync(file);
-      if (!isBinary(content) && PRIVATE_KEY_BLOCK.test(content.toString('utf8'))) {
-        problems.push(`plugins/${rel}: contains a private key block`);
-      }
+  const visit = (dir, relDir) => {
+    let names;
+    try {
+      names = readdirSync(dir).sort();
+    } catch (error) {
+      problems.push(`plugins/${relDir}: cannot be read (${error.code ?? 'error'})`);
+      return true;
     }
-  }
+    for (const name of names) {
+      const rel = relDir ? `${relDir}/${name}` : name;
+      const full = path.join(dir, name);
+      let stats;
+      try {
+        stats = lstatSync(full);
+      } catch (error) {
+        problems.push(`plugins/${rel}: cannot be read (${error.code ?? 'error'})`);
+        continue;
+      }
+      if (stats.isSymbolicLink()) problems.push(`plugins/${rel}: symlinks are not allowed`);
+      else if (stats.isDirectory()) {
+        if (!visit(full, rel)) return false;
+      } else if (!stats.isFile()) problems.push(`plugins/${rel}: only regular files are allowed`);
+      else if (files.length === MAX_FILES) {
+        problems.push(`plugins/: has more than ${MAX_FILES} files`);
+        return false;
+      } else files.push({ rel, full, size: stats.size });
+    }
+    return true;
+  };
+  visit(pluginsDir, '');
+  return { files, problems };
+}
+
+/** Key material and tokens, searched in every file's raw bytes, binaries and vendored code included. */
+function findSecrets(at, rel, content) {
+  const problems = [];
+  if (FORBIDDEN_FILE.test(rel)) problems.push(`${at}: local state or key file`);
+  const raw = content.toString('latin1');
+  const found = new Set(SECRETS.filter(([pattern]) => pattern.test(raw)).map(([, what]) => what));
+  for (const what of found) problems.push(`${at}: contains ${what}`);
   return problems;
 }
 
-function startsWithLfsPointer(file) {
-  const fd = openSync(file, 'r');
-  try {
-    const buffer = Buffer.alloc(LFS_POINTER.length);
-    readSync(fd, buffer, 0, buffer.length, 0);
-    return buffer.toString('utf8') === LFS_POINTER;
-  } finally {
-    closeSync(fd);
+/**
+ * Invisible Unicode in text files. A file is text if it has a known text extension, is a dotfile or
+ * starts with "#!" (a NUL byte in one is itself a problem), or if it decodes as valid UTF-8. A
+ * leading BOM is fine.
+ */
+function findHiddenText(at, rel, content) {
+  let text;
+  if (TEXT_FILE.test(rel) || content.subarray(0, 2).toString('latin1') === '#!') {
+    if (content.includes(0)) return [`${at}: is a text file but contains a NUL byte`];
+    text = content.toString('utf8');
+  } else {
+    try {
+      text = utf8.decode(content);
+    } catch {
+      return [];
+    }
   }
+  const offset = text.startsWith('\uFEFF') ? 1 : 0;
+  const match = INVISIBLE.exec(text.slice(offset));
+  if (!match) return [];
+  const line = text.slice(0, offset + match.index).split('\n').length;
+  return [`${at}: contains invisible Unicode ${codePoint(match[0])} (line ${line})`];
 }
 
 /**
- * Packaging rules for plugins that vendor native binaries. Claude's clone does not fetch Git LFS,
- * so LFS would ship pointer files, and compiled libraries need a notices file at the plugin root.
+ * Git metadata that changes what a checkout contains: submodules, and .gitattributes drivers and
+ * export rules. Claude's clone does not fetch Git LFS, so LFS would ship pointer files.
  */
-function findPackagingProblems(pluginsDir) {
+function findGitMetadata(at, rel, content) {
+  const name = path.posix.basename(rel);
+  if (name === '.gitmodules') return [`${at}: submodules are not allowed`];
+  if (name !== '.gitattributes') return [];
+  const problems = [];
+  content
+    .toString('utf8')
+    .split('\n')
+    .forEach((line, index) => {
+      if (line.trim().startsWith('#')) return;
+      if (LFS_ATTRIBUTE.test(line)) {
+        problems.push(`${at}: Git LFS is not supported (clones would contain pointer files)`);
+        return;
+      }
+      const driver = DRIVER_ATTRIBUTE.exec(line);
+      if (driver) {
+        problems.push(
+          `${at}: line ${index + 1} sets ${driver[1]}; filter, diff, merge and export-ignore are not allowed`,
+        );
+      }
+    });
+  return [...new Set(problems)];
+}
+
+/** Gitlinks (mode 160000) under plugins/, when root is a git work tree. */
+function findGitlinks(root) {
+  let listing;
+  try {
+    listing = execFileSync('git', ['ls-files', '-s', '-z', '--', 'plugins'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+  } catch {
+    return [];
+  }
+  return listing
+    .split('\0')
+    .filter(record => record.startsWith('160000 '))
+    .map(record => `${record.split('\t')[1]}: submodules are not allowed`);
+}
+
+/**
+ * Checks every file under plugins/: size, secrets, invisible Unicode, git metadata and LFS
+ * pointers. Compiled .node libraries need a notices file at the plugin root.
+ */
+function checkPluginFiles(files) {
   const problems = [];
   const nativeByPlugin = new Map();
-  for (const file of walk(pluginsDir)) {
-    const rel = path.relative(pluginsDir, file).split(path.sep).join('/');
-    if (path.basename(rel) === '.gitattributes' && LFS_ATTRIBUTE.test(readFileSync(file, 'utf8'))) {
-      problems.push(`plugins/${rel}: Git LFS is not supported (clones would contain pointer files)`);
-    } else if (statSync(file).size >= LFS_POINTER.length && startsWithLfsPointer(file)) {
-      problems.push(`plugins/${rel}: is a Git LFS pointer, commit the real file instead`);
-    }
+  for (const { rel, full, size } of files) {
+    const at = `plugins/${rel}`;
     if (rel.endsWith('.node')) {
       const plugin = rel.split('/')[0];
       nativeByPlugin.set(plugin, (nativeByPlugin.get(plugin) ?? 0) + 1);
     }
+    if (size > MAX_FILE_BYTES) {
+      problems.push(`${at}: is larger than ${MAX_FILE_BYTES / 1024 / 1024} MB`);
+      continue;
+    }
+    let content;
+    try {
+      content = readFileSync(full);
+    } catch (error) {
+      problems.push(`${at}: cannot be read (${error.code ?? 'error'})`);
+      continue;
+    }
+    problems.push(
+      ...findSecrets(at, rel, content),
+      ...findHiddenText(at, rel, content),
+      ...findGitMetadata(at, rel, content),
+    );
+    if (content.subarray(0, LFS_POINTER.length).toString('utf8') === LFS_POINTER) {
+      problems.push(`${at}: is a Git LFS pointer, commit the real file instead`);
+    }
   }
   for (const plugin of nativeByPlugin.keys()) {
-    const hasNotices = readdirSync(path.join(pluginsDir, plugin)).some(name => NOTICES_FILE.test(name));
+    const hasNotices = files.some(({ rel }) => {
+      const [dir, name, ...rest] = rel.split('/');
+      return dir === plugin && rest.length === 0 && NOTICES_FILE.test(name ?? '');
+    });
     if (!hasNotices) {
       problems.push(`plugins/${plugin}: ships native .node binaries, add THIRD_PARTY_NOTICES at the plugin root`);
     }
   }
   return problems;
+}
+
+/** A canonical https://github.com/<owner>/<repo>(.git) URL with no credentials, port, query or hash. */
+function isGithubRepoUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const match = parsed.pathname.match(/^\/([^/]+)\/([^/]+?)(\.git)?$/);
+  return (
+    parsed.href === url &&
+    parsed.protocol === 'https:' &&
+    parsed.host === 'github.com' &&
+    parsed.username === '' &&
+    parsed.password === '' &&
+    parsed.search === '' &&
+    parsed.hash === '' &&
+    match !== null &&
+    REPO_SEGMENT.test(match[1]) &&
+    REPO_SEGMENT.test(match[2])
+  );
+}
+
+/** A relative POSIX path inside the repository: no leading "/", "\", ".." segment or NUL. */
+function isRelativePath(value) {
+  return (
+    typeof value === 'string' &&
+    value !== '' &&
+    !value.startsWith('/') &&
+    !value.includes('\\') &&
+    !value.includes('\0') &&
+    !value.split('/').includes('..')
+  );
 }
 
 /** The plugin's git source as { url, path? }, or an error string. */
@@ -139,16 +334,19 @@ function gitSource(source, harness) {
   }
   let url = source.url;
   if (source.source === 'github') {
-    if (typeof source.repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(source.repo)) {
+    const segments = typeof source.repo === 'string' ? source.repo.split('/') : [];
+    if (segments.length !== 2 || !segments.every(segment => REPO_SEGMENT.test(segment))) {
       return { error: 'github source needs "repo" as owner/repo' };
     }
     url = `https://github.com/${source.repo}.git`;
   }
-  if (typeof url !== 'string' || !url.startsWith('https://')) {
-    return { error: 'git source needs an https:// "url" (no ssh, file or http)' };
+  if (typeof url !== 'string' || !isGithubRepoUrl(url)) {
+    return {
+      error: 'git source needs "url" as https://github.com/<owner>/<repo>(.git), with no credentials or other parts',
+    };
   }
-  if (source.path !== undefined && (typeof source.path !== 'string' || source.path.includes('..'))) {
-    return { error: '"path" must be a string without ".."' };
+  if (source.path !== undefined && !isRelativePath(source.path)) {
+    return { error: '"path" must be a relative POSIX path, without "..", "\\" or a leading "/"' };
   }
   if (source.source === 'git-subdir' && typeof source.path !== 'string') {
     return { error: 'git-subdir source needs "path"' };
@@ -159,18 +357,23 @@ function gitSource(source, harness) {
 function checkRemoteCommit(url, sha) {
   const scratch = mkdtempSync(path.join(tmpdir(), 'validate-marketplace-'));
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  const safe = [
+    '-c', 'protocol.allow=never',
+    '-c', 'protocol.https.allow=always',
+    '-c', 'http.followRedirects=false',
+    '-c', 'credential.helper=',
+  ];
   try {
     execFileSync('git', ['init', '-q'], { cwd: scratch, env, stdio: 'pipe' });
-    execFileSync('git', ['fetch', '-q', '--depth=1', url, sha], {
+    execFileSync('git', [...safe, 'fetch', '-q', '--depth=1', url, sha], {
       cwd: scratch,
       env,
       stdio: 'pipe',
       timeout: 60_000,
     });
     return null;
-  } catch (error) {
-    const detail = String(error.stderr ?? error.message).trim().split('\n')[0];
-    return `commit ${sha} is not fetchable from ${url} (${detail})`;
+  } catch {
+    return `commit ${sha} is not fetchable from ${url}`;
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
@@ -185,24 +388,36 @@ function checkLocalEntry(root, entry, harness, problem) {
     return;
   }
   const pluginDir = path.join(root, 'plugins', entry.name);
-  if (!existsSync(pluginDir) || !statSync(pluginDir).isDirectory()) {
+  let stats;
+  try {
+    stats = lstatSync(pluginDir);
+  } catch {
     problem(`${expected} does not exist`);
     return;
   }
-  const manifestPath = HARNESSES[harness].manifestPaths.find(rel =>
+  if (!stats.isDirectory()) {
+    problem(`${expected} must be a directory`);
+    return;
+  }
+  const manifestPaths = HARNESSES[harness].manifestPaths.filter(rel =>
     existsSync(path.join(pluginDir, rel)),
   );
-  if (!manifestPath) {
+  if (manifestPaths.length === 0) {
     problem(`${expected} has no ${HARNESSES[harness].manifestPaths.join(' or ')}`);
     return;
   }
-  let manifest;
-  try {
-    manifest = readJson(path.join(pluginDir, manifestPath));
-  } catch (error) {
-    problem(`${expected}/${manifestPath} is not valid JSON (${error.message})`);
+  if (manifestPaths.length > 1) {
+    problem(`${expected} has both ${manifestPaths.join(' and ')}; use one manifest`);
     return;
   }
+  const [manifestPath] = manifestPaths;
+  const read = readJson(path.join(pluginDir, manifestPath), `${expected}/${manifestPath}`);
+  if (read.error) {
+    problem(read.error);
+    return;
+  }
+  const manifest = read.value;
+  for (const hidden of findInvisibleStrings(manifest)) problem(`${manifestPath}: ${hidden}`);
   if (manifest.name !== entry.name) {
     problem(
       `${manifestPath} name ${JSON.stringify(manifest.name)} must equal the entry name "${entry.name}"`,
@@ -215,31 +430,56 @@ function checkLocalEntry(root, entry, harness, problem) {
   }
 }
 
-/** Returns a list of problems; empty means the marketplace is valid. */
-export function validateMarketplace(root, harness, { checkRemote = false } = {}) {
-  const target = HARNESSES[harness];
+function checkCodexEntry(entry, problem) {
+  const { policy } = entry;
+  if (!isObject(policy) || !policy.installation || !policy.authentication) {
+    problem('policy.installation and policy.authentication are required');
+  } else {
+    if (policy.installation === 'INSTALLED_BY_DEFAULT') {
+      problem('policy.installation "INSTALLED_BY_DEFAULT" is not allowed in this marketplace');
+    } else if (!CODEX_POLICY.installation.includes(policy.installation)) {
+      problem(
+        `policy.installation must be ${CODEX_POLICY.installation.join(' or ')}, got ${JSON.stringify(policy.installation)}`,
+      );
+    }
+    if (!CODEX_POLICY.authentication.includes(policy.authentication)) {
+      problem(
+        `policy.authentication must be ${CODEX_POLICY.authentication.join(' or ')}, got ${JSON.stringify(policy.authentication)}`,
+      );
+    }
+  }
+  // Codex defines no list of categories, so any short single-line label is fine.
+  if (typeof entry.category !== 'string' || !entry.category.trim()) problem('category is required');
+  else if (CONTROL_OR_LINE_BREAK.test(entry.category) || [...entry.category].length > MAX_CATEGORY_LENGTH) {
+    problem(`category must be one line of at most ${MAX_CATEGORY_LENGTH} characters`);
+  }
+}
+
+function collectProblems(root, harness, checkRemote) {
+  const target = Object.hasOwn(HARNESSES, harness) ? HARNESSES[harness] : undefined;
   if (!target) return [`unknown harness "${harness}" (use claude or codex)`];
 
   const problems = [];
   const manifestFile = path.join(root, target.marketplacePath);
   if (!existsSync(manifestFile)) return [`${target.marketplacePath} not found`];
 
-  let marketplace;
-  try {
-    marketplace = readJson(manifestFile);
-  } catch (error) {
-    return [`${target.marketplacePath} is not valid JSON (${error.message})`];
-  }
+  const read = readJson(manifestFile, target.marketplacePath);
+  if (read.error) return [read.error];
+  const marketplace = read.value;
   if (!isObject(marketplace)) return [`${target.marketplacePath} must be a JSON object`];
 
+  for (const hidden of findInvisibleStrings(marketplace)) problems.push(`marketplace: ${hidden}`);
   if (marketplace.name !== MARKETPLACE_NAME) {
     problems.push(`marketplace: name must be "${MARKETPLACE_NAME}", got ${JSON.stringify(marketplace.name)}`);
   }
   if (harness === 'claude' && !(isObject(marketplace.owner) && marketplace.owner.name)) {
     problems.push('marketplace: owner.name is required');
   }
-  if (harness === 'codex' && !(isObject(marketplace.interface) && marketplace.interface.displayName)) {
-    problems.push('marketplace: interface.displayName is required');
+  if (
+    harness === 'codex' &&
+    !(isObject(marketplace.interface) && marketplace.interface.displayName === CODEX_DISPLAY_NAME)
+  ) {
+    problems.push(`marketplace: interface.displayName must be "${CODEX_DISPLAY_NAME}"`);
   }
   if (!Array.isArray(marketplace.plugins)) {
     problems.push('marketplace: "plugins" must be an array');
@@ -248,24 +488,27 @@ export function validateMarketplace(root, harness, { checkRemote = false } = {})
 
   const names = new Set();
   const localNames = new Set();
+  const remote = [];
   marketplace.plugins.forEach((entry, index) => {
     const label = `plugins[${index}]${isObject(entry) && entry.name ? ` (${entry.name})` : ''}`;
     const problem = message => problems.push(`${label}: ${message}`);
 
     if (!isObject(entry)) return problem('must be an object');
-    if (typeof entry.name !== 'string' || !NAME.test(entry.name)) {
-      return problem('name must be letters, digits, ".", "_" or "-", starting with a letter or digit');
+    if (RESERVED_NAMES.has(entry.name)) return problem(`name "${entry.name}" is reserved`);
+    if (typeof entry.name !== 'string' || !NAME.test(entry.name) || entry.name.length > MAX_NAME_LENGTH) {
+      return problem(
+        `name must be lowercase letters and digits separated by single hyphens, at most ${MAX_NAME_LENGTH} characters`,
+      );
     }
     if (names.has(entry.name)) problem('duplicate plugin name');
     names.add(entry.name);
-
-    if (harness === 'codex') {
-      const policy = entry.policy;
-      if (!isObject(policy) || !policy.installation || !policy.authentication) {
-        problem('policy.installation and policy.authentication are required');
+    for (const key of Object.keys(entry)) {
+      if (!target.entryFields.includes(key)) {
+        problem(`field ${JSON.stringify(key)} is not allowed in a marketplace entry (allowed: ${target.entryFields.join(', ')})`);
       }
-      if (typeof entry.category !== 'string' || !entry.category) problem('category is required');
     }
+
+    if (harness === 'codex') checkCodexEntry(entry, problem);
 
     const { source } = entry;
     const isLocal =
@@ -284,22 +527,55 @@ export function validateMarketplace(root, harness, { checkRemote = false } = {})
     if (typeof source.sha !== 'string' || !SHA.test(source.sha)) {
       return problem('git sources must pin "sha" to a full 40-character lowercase commit');
     }
-    if (checkRemote) {
-      const failure = checkRemoteCommit(git.url, source.sha);
-      if (failure) problem(failure);
-    }
+    remote.push({ url: git.url, sha: source.sha, problem });
   });
 
-  const pluginsDir = path.join(root, 'plugins');
-  if (existsSync(pluginsDir)) {
-    for (const name of readdirSync(pluginsDir).sort()) {
-      if (statSync(path.join(pluginsDir, name)).isDirectory() && !localNames.has(name)) {
-        problems.push(`plugins/${name}: directory has no matching local entry in the marketplace`);
-      }
+  if (checkRemote && remote.length > MAX_REMOTE_CHECKS) {
+    problems.push(
+      `marketplace: --check-remote fetches at most ${MAX_REMOTE_CHECKS} pinned git entries, found ${remote.length}`,
+    );
+  } else if (checkRemote) {
+    for (const { url, sha, problem } of remote) {
+      const failure = checkRemoteCommit(url, sha);
+      if (failure) problem(failure);
     }
-    problems.push(...findSecrets(pluginsDir), ...findPackagingProblems(pluginsDir));
   }
+
+  problems.push(...findGitlinks(root));
+  const pluginsDir = path.join(root, 'plugins');
+  let pluginsStats;
+  try {
+    pluginsStats = lstatSync(pluginsDir);
+  } catch {
+    return problems;
+  }
+  if (!pluginsStats.isDirectory()) {
+    problems.push('plugins: must be a directory, not a symlink or file');
+    return problems;
+  }
+  const { files, problems: walkProblems } = walkPlugins(pluginsDir);
+  problems.push(...walkProblems);
+  let topLevel = [];
+  try {
+    topLevel = readdirSync(pluginsDir, { withFileTypes: true });
+  } catch {
+    // walkPlugins already reported it.
+  }
+  for (const dirent of topLevel.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (dirent.isDirectory() && !localNames.has(dirent.name)) {
+      problems.push(`plugins/${dirent.name}: directory has no matching local entry in the marketplace`);
+    }
+  }
+  problems.push(...checkPluginFiles(files));
   return problems;
+}
+
+/**
+ * Returns a list of problems; empty means the marketplace is valid. Control characters are
+ * stripped from every problem, since parts of them come from the checked repo.
+ */
+export function validateMarketplace(root, harness, { checkRemote = false } = {}) {
+  return collectProblems(root, harness, checkRemote).map(stripControl);
 }
 
 export function parseArgs(argv) {
@@ -335,7 +611,7 @@ function main() {
   }
   const problems = validateMarketplace(root, harness, { checkRemote: args['check-remote'] });
   if (problems.length > 0) {
-    console.error(`${problems.length} problem(s) in ${HARNESSES[harness]?.marketplacePath ?? harness}:`);
+    console.error(`${problems.length} problem(s) in ${HARNESSES[harness]?.marketplacePath ?? stripControl(harness)}:`);
     for (const problem of problems) console.error(`  - ${problem}`);
     process.exit(1);
   }

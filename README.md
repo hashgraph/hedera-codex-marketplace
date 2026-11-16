@@ -65,7 +65,8 @@ pull request, by hand or from its own release workflow.
 `url` (plugin at the repository root) and `git-subdir` are accepted. `ref` and `sha` are both
 required: `ref` is a release tag and `sha` is the full 40-character commit that tag points to.
 Reviewers approve exactly that commit, and an update is a pull request that changes both.
-TODO: say whether Codex installs `ref` or `sha` when both are set, once we have tested it.
+When both are set, Codex installs `sha` and ignores `ref` without checking that they agree (tested
+with Codex CLI 0.167.0), so CI checks that the tag resolves to `sha` before anyone reviews it.
 Details are in the
 [Codex plugin docs](https://developers.openai.com/codex/plugins/build/).
 

@@ -65,11 +65,14 @@ const SECRETS = [
   [/(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])/, 'an AWS access key'],
   [/xox[bp]-\d{10,13}-\d{10,13}-[A-Za-z0-9-]{24,}/, 'a Slack token'],
 ];
-// Unicode format characters that render as nothing or reorder text: soft hyphen, zero-width and
-// bidi controls, word joiners, BOM, and tag characters.
+// Unicode format characters that render as nothing or reorder text: soft hyphen, the Arabic letter
+// mark, zero-width and bidi controls, word joiners, BOM, tag characters and the supplementary
+// variation selectors. U+FE00-FE0F may follow a character once (emoji use U+FE0F); a run of them
+// can carry hidden text.
 const INVISIBLE =
-  /[\u00AD\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}]/u;
-const TEXT_FILE = /(^|\/)\.[^/]+$|\.(md|json|js|mjs|cjs|ts|txt|yml|yaml|toml|sh)$/i;
+  /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]|[\uFE00-\uFE0F]{2,}/u;
+const TEXT_FILE =
+  /(^|\/)\.[^/]+$|\.(md|mdx|markdown|rst|txt|json|jsonc|js|mjs|cjs|jsx|ts|mts|cts|tsx|yml|yaml|toml|ini|cfg|conf|sh|bash|zsh|fish|ps1|bat|cmd|py|rb|pl|php|lua|sql|html|htm|xml|svg|css|csv|tsv)$/i;
 const LFS_POINTER = 'version https://git-lfs.github.com/spec/';
 const LFS_ATTRIBUTE = /(^|\s)filter=lfs(\s|$)/;
 const DRIVER_ATTRIBUTE = /(?:^|\s)((?:filter|diff|merge)=\S*|export-ignore(?=\s|$))/;
@@ -78,7 +81,8 @@ const CODEX_POLICY = {
   installation: ['AVAILABLE', 'NOT_AVAILABLE'],
   authentication: ['ON_INSTALL', 'ON_USE'],
 };
-const CODEX_CATEGORIES = ['Developer Tools', 'Productivity'];
+const MAX_CATEGORY_LENGTH = 64;
+const CONTROL_OR_LINE_BREAK = /[\x00-\x1f\x7f-\x9f\u2028\u2029]/;
 const CODEX_DISPLAY_NAME = 'Hedera';
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -103,12 +107,17 @@ function findInvisibleStrings(value, at = '') {
     const match = INVISIBLE.exec(value);
     return match ? [`${at || 'value'} contains invisible Unicode ${codePoint(match[0])}`] : [];
   }
+  const problems = [];
+  for (const key of isObject(value) ? Object.keys(value) : []) {
+    const match = INVISIBLE.exec(key);
+    if (match) problems.push(`${at ? `a key in ${at}` : 'a top-level key'} contains invisible Unicode ${codePoint(match[0])}`);
+  }
   const children = Array.isArray(value)
     ? value.map((item, index) => [`${at}[${index}]`, item])
     : isObject(value)
       ? Object.entries(value).map(([key, item]) => [at ? `${at}.${key}` : key, item])
       : [];
-  return children.flatMap(([childAt, item]) => findInvisibleStrings(item, childAt));
+  return [...problems, ...children.flatMap(([childAt, item]) => findInvisibleStrings(item, childAt))];
 }
 
 /**
@@ -162,12 +171,13 @@ function findSecrets(at, rel, content) {
 }
 
 /**
- * Invisible Unicode in text files. A file is text if it has a known text extension or is a dotfile
- * (a NUL byte in one is itself a problem), or if it decodes as valid UTF-8. A leading BOM is fine.
+ * Invisible Unicode in text files. A file is text if it has a known text extension, is a dotfile or
+ * starts with "#!" (a NUL byte in one is itself a problem), or if it decodes as valid UTF-8. A
+ * leading BOM is fine.
  */
 function findHiddenText(at, rel, content) {
   let text;
-  if (TEXT_FILE.test(rel)) {
+  if (TEXT_FILE.test(rel) || content.subarray(0, 2).toString('latin1') === '#!') {
     if (content.includes(0)) return [`${at}: is a text file but contains a NUL byte`];
     text = content.toString('utf8');
   } else {
@@ -480,9 +490,10 @@ function checkCodexEntry(entry, problem) {
       );
     }
   }
-  if (typeof entry.category !== 'string' || !entry.category) problem('category is required');
-  else if (!CODEX_CATEGORIES.includes(entry.category)) {
-    problem(`category must be one of ${CODEX_CATEGORIES.join(', ')}, got ${JSON.stringify(entry.category)}`);
+  // Codex defines no list of categories, so any short single-line label is fine.
+  if (typeof entry.category !== 'string' || !entry.category.trim()) problem('category is required');
+  else if (CONTROL_OR_LINE_BREAK.test(entry.category) || [...entry.category].length > MAX_CATEGORY_LENGTH) {
+    problem(`category must be one line of at most ${MAX_CATEGORY_LENGTH} characters`);
   }
 }
 

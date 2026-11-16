@@ -417,6 +417,31 @@ for (const harness of ['claude', 'codex']) {
       assert.doesNotMatch(output, /bom\.md/);
     });
 
+    test('an invalid byte does not hide invisible Unicode in text a model may read', () => {
+      const root = makeRepo(harness, { plugins: [localEntry[harness]('demo')], dirs: { demo: '1.0.0' } });
+      const hidden = text => Buffer.concat([Buffer.from(`${text}${String.fromCodePoint(0xe0049)}\n`), Buffer.from([0xff])]);
+      write(root, 'plugins/demo/skills/pay/reference.mdx', hidden('# Ref'));
+      write(root, 'plugins/demo/scripts/run.py', hidden('# run'));
+      write(root, 'plugins/demo/bin/tool', hidden('#!/bin/sh\n# tool'));
+      const output = validate(root).join('\n');
+      for (const file of ['skills/pay/reference.mdx', 'scripts/run.py', 'bin/tool']) {
+        assert.match(output, new RegExp(`plugins/demo/${file}: contains invisible Unicode U\\+E0049`), file);
+      }
+    });
+
+    test('rejects the Arabic letter mark, supplementary variation selectors and runs of selectors', () => {
+      const root = makeRepo(harness, { plugins: [localEntry[harness]('demo')], dirs: { demo: '1.0.0' } });
+      write(root, 'plugins/demo/a.md', 'mark \u061c here');
+      write(root, 'plugins/demo/b.md', `smuggled a${String.fromCodePoint(0xe0100, 0xe0101)}`);
+      write(root, 'plugins/demo/c.md', 'smuggled a\ufe01\ufe0f');
+      write(root, 'plugins/demo/emoji.md', 'Warning \u26a0\ufe0f and \u2764\ufe0e are fine.\n');
+      const output = validate(root).join('\n');
+      assert.match(output, /plugins\/demo\/a\.md: contains invisible Unicode U\+061C/);
+      assert.match(output, /plugins\/demo\/b\.md: contains invisible Unicode U\+E0100/);
+      assert.match(output, /plugins\/demo\/c\.md: contains invisible Unicode U\+FE01/);
+      assert.doesNotMatch(output, /emoji\.md/);
+    });
+
     test('rejects invisible Unicode in manifest strings, escaped or not', () => {
       const entry = { ...localEntry[harness]('demo'), description: 'Pays\u200b invoices.' };
       const root = makeRepo(harness, {
@@ -429,6 +454,17 @@ for (const harness of ['claude', 'codex']) {
       assert.match(output, /marketplace: description contains invisible Unicode U\+202E/);
       assert.match(output, /marketplace: plugins\[0\]\.description contains invisible Unicode U\+200B/);
       assert.match(output, /plugin\.json: description contains invisible Unicode U\+2063/);
+    });
+
+    test('rejects invisible Unicode in manifest keys', () => {
+      const root = makeRepo(harness, {
+        dirs: { demo: '1.0.0' },
+        plugins: [localEntry[harness]('demo')],
+        marketplace: { metadata: { 'note\u200b': 'x' }, 'extra\u202e': true },
+      });
+      const output = validate(root).join('\n');
+      assert.match(output, /marketplace: a key in metadata contains invisible Unicode U\+200B/);
+      assert.match(output, /marketplace: a top-level key contains invisible Unicode U\+202E/);
     });
 
     test('rejects .gitmodules and git attribute drivers under plugins/', () => {
@@ -612,14 +648,24 @@ describe('codex only', () => {
     }
   });
 
-  test('policy and category values come from fixed lists', () => {
+  test('policy values come from fixed lists', () => {
     const entry = localEntry.codex('demo');
     entry.policy = { installation: 'WHATEVER', authentication: 'SOMETIMES' };
-    entry.category = 'Finance';
     const output = validateMarketplace(makeRepo('codex', { plugins: [entry], dirs: { demo: '1.0.0' } }), 'codex').join('\n');
     assert.match(output, /policy\.installation must be AVAILABLE or NOT_AVAILABLE, got "WHATEVER"/);
     assert.match(output, /policy\.authentication must be ON_INSTALL or ON_USE, got "SOMETIMES"/);
-    assert.match(output, /category must be one of Developer Tools, Productivity, got "Finance"/);
+  });
+
+  test('category is free text: one non-empty line of at most 64 characters', () => {
+    const check = category => {
+      const entry = { ...localEntry.codex('demo'), category };
+      return validateMarketplace(makeRepo('codex', { plugins: [entry], dirs: { demo: '1.0.0' } }), 'codex').join('\n');
+    };
+    for (const category of ['Finance', 'Developer Tools', 'é'.repeat(64)]) assert.equal(check(category), '', category);
+    for (const category of ['', '   ', 7]) assert.match(check(category), /category is required/, JSON.stringify(category));
+    for (const category of ['a'.repeat(65), 'Dev\nTools', 'Dev\tTools', 'Dev\u2028Tools']) {
+      assert.match(check(category), /category must be one line of at most 64 characters/, JSON.stringify(category));
+    }
   });
 
   test('rejects INSTALLED_BY_DEFAULT', () => {
@@ -629,10 +675,9 @@ describe('codex only', () => {
     assert.match(output, /"INSTALLED_BY_DEFAULT" is not allowed in this marketplace/);
   });
 
-  test('accepts the other documented policy and category values', () => {
+  test('accepts the other documented policy values', () => {
     const entry = localEntry.codex('demo');
     entry.policy = { installation: 'NOT_AVAILABLE', authentication: 'ON_USE' };
-    entry.category = 'Productivity';
     assert.deepEqual(validateMarketplace(makeRepo('codex', { plugins: [entry], dirs: { demo: '1.0.0' } }), 'codex'), []);
   });
 

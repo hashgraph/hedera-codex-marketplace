@@ -78,7 +78,7 @@ Details are in the
 - Plugin names are lowercase kebab-case, at most 64 characters, unique, and not reserved (such as
   `node_modules`).
 - Every entry has a `policy` and a `category`. `installation` is `AVAILABLE` or `NOT_AVAILABLE`,
-  `authentication` is `ON_INSTALL` or `ON_USE`, and `category` is `Developer Tools` or `Productivity`.
+  `authentication` is `ON_INSTALL` or `ON_USE`, and `category` is one line of at most 64 characters.
 - An in-repo entry points at `./plugins/<name>`, that folder exists, and it has one manifest (not
   both) with the same `name` and a semver `version`.
 - Files under `plugins/` include no symlinks, submodules, `.gitattributes` drivers or invisible

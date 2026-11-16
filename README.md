@@ -62,9 +62,12 @@ pull request, by hand or from its own release workflow.
 }
 ```
 
-`url` (plugin at the repository root) and `git-subdir` are accepted. `sha` is required and must be
-the full 40-character commit. Reviewers approve exactly that commit, and an update is a pull request
-that changes `sha`. Details are in the
+`url` (plugin at the repository root) and `git-subdir` are accepted. `ref` and `sha` are both
+required: `ref` is a release tag and `sha` is the full 40-character commit that tag points to.
+Reviewers approve exactly that commit, and an update is a pull request that changes both.
+When both are set, Codex installs `sha` and ignores `ref` without checking that they agree (tested
+with Codex CLI 0.167.0), so CI checks that the tag resolves to `sha` before anyone reviews it.
+Details are in the
 [Codex plugin docs](https://developers.openai.com/codex/plugins/build/).
 
 ## What CI checks
@@ -81,8 +84,9 @@ that changes `sha`. Details are in the
   both) with the same `name` and a semver `version`.
 - Files under `plugins/` include no symlinks, submodules, `.gitattributes` drivers or invisible
   Unicode characters, and none is over 16 MB.
-- A pinned git entry uses an `https://github.com/<owner>/<repo>` URL, a relative `path` and a
-  full `sha` that can be fetched.
+- A pinned git entry uses an `https://github.com/<owner>/<repo>` URL, a relative `path`, a tag
+  `ref` and a full `sha`. With `--check-remote`, the tag must resolve to exactly that commit in the
+  upstream repository.
 - Every folder in `plugins/` has an entry, and no folder holds key material, `.env` files or a
   keystore.
 

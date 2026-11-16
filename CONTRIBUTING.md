@@ -27,11 +27,11 @@ description, and make changes in that repository.
 
 1. Fork the repository and create a branch.
 2. Add one object to `plugins` in `.agents/plugins/marketplace.json` using a `url` or `git-subdir`
-   source with `sha` set to the full 40-character commit you want users to get, plus `policy` and
-   `category`.
+   source, plus `policy` and `category`. Set `ref` to the release tag, and `sha` to the full
+   40-character commit that tag points to.
 3. Run `node scripts/validate-marketplace.mjs . --check-remote`. The repository must be public.
 
-To update the plugin later, open a PR that changes `sha` (and `ref`, if you use it).
+To update the plugin later, tag a new release and open a PR that changes `ref` and `sha`.
 
 ## Plugins that ship `node_modules/` or native binaries
 

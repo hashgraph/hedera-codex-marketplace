@@ -26,11 +26,19 @@ export const HARNESSES = {
     marketplacePath: '.claude-plugin/marketplace.json',
     manifestPaths: ['.claude-plugin/plugin.json'],
     gitSourceTypes: ['github', 'url', 'git-subdir'],
+    // Listing fields only. Claude Code also merges components (hooks, commands, agents, skills, MCP
+    // servers, ...) from an entry into the plugin, out of sight of the plugin checks, so they must
+    // live in the plugin's own files.
+    entryFields: [
+      'name', 'source', 'description', 'version', 'author', 'homepage', 'repository', 'license',
+      'keywords', 'category', 'tags', 'displayName',
+    ],
   },
   codex: {
     marketplacePath: '.agents/plugins/marketplace.json',
     manifestPaths: ['.codex-plugin/plugin.json', 'plugin.json'],
     gitSourceTypes: ['url', 'git-subdir'],
+    entryFields: ['name', 'source', 'description', 'policy', 'category'],
   },
 };
 
@@ -494,6 +502,11 @@ function collectProblems(root, harness, checkRemote) {
     }
     if (names.has(entry.name)) problem('duplicate plugin name');
     names.add(entry.name);
+    for (const key of Object.keys(entry)) {
+      if (!target.entryFields.includes(key)) {
+        problem(`field ${JSON.stringify(key)} is not allowed in a marketplace entry (allowed: ${target.entryFields.join(', ')})`);
+      }
+    }
 
     if (harness === 'codex') checkCodexEntry(entry, problem);
 

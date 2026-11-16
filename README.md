@@ -74,6 +74,7 @@ that changes `sha`. Details are in the
 - The marketplace is named `hedera` and its display name is `Hedera`.
 - Plugin names are lowercase kebab-case, at most 64 characters, unique, and not reserved (such as
   `node_modules`).
+- Entries carry only `name`, `source`, `description`, `policy` and `category`.
 - Every entry has a `policy` and a `category`. `installation` is `AVAILABLE` or `NOT_AVAILABLE`,
   `authentication` is `ON_INSTALL` or `ON_USE`, and `category` is one line of at most 64 characters.
 - An in-repo entry points at `./plugins/<name>`, that folder exists, and it has one manifest (not

@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, test } from 'node:test';
+import { after, afterEach, before, describe, test } from 'node:test';
 
 import {
   HARNESSES,
@@ -15,6 +15,7 @@ import {
 } from './validate-marketplace.mjs';
 
 const SHA = 'a'.repeat(40);
+const REF = 'v1.2.0';
 const roots = [];
 
 afterEach(() => {
@@ -85,11 +86,11 @@ for (const harness of ['claude', 'codex']) {
 
     test('valid pinned git entries', () => {
       const sources = [
-        { source: 'url', url: 'https://github.com/acme/demo.git', sha: SHA },
-        { source: 'git-subdir', url: 'https://github.com/acme/mono.git', path: 'tools/demo', sha: SHA },
-        { source: 'git-subdir', url: 'https://github.com/acme/mono', path: './plugins/demo', sha: SHA },
+        { source: 'url', url: 'https://github.com/acme/demo.git', ref: REF, sha: SHA },
+        { source: 'git-subdir', url: 'https://github.com/acme/mono.git', path: 'tools/demo', ref: 'release/2.0', sha: SHA },
+        { source: 'git-subdir', url: 'https://github.com/acme/mono', path: './plugins/demo', ref: '@acme/demo@1.0.0', sha: SHA },
       ];
-      if (harness === 'claude') sources.push({ source: 'github', repo: 'acme/demo', sha: SHA });
+      if (harness === 'claude') sources.push({ source: 'github', repo: 'acme/demo', ref: REF, sha: SHA });
       const plugins = sources.map((source, i) => gitEntry[harness](`demo-${i}`, source));
       assert.deepEqual(validate(makeRepo(harness, { plugins })), []);
     });
@@ -108,6 +109,16 @@ for (const harness of ['claude', 'codex']) {
       for (const sha of ['abc123', 'A'.repeat(40)]) {
         const entry = gitEntry[harness]('demo', { source: 'url', url: 'https://github.com/acme/demo.git', sha });
         assert.match(validate(makeRepo(harness, { plugins: [entry] })).join('\n'), /pin "sha"/);
+      }
+    });
+
+    test('git sources need "ref" as a tag name', () => {
+      const refs = [undefined, 1, '', 'refs/tags/v1.2.0', 'v1..2', '-v1', '.v1', 'v1/', '/v1', 'v1//2', 'v1.',
+        'v1.lock', 'v1 2', 'v1~1', 'v1^{}', 'v1:x', 'v*', 'v?', 'v[1]', 'v1@{0}', '@', 'v1\\2', 'v1\n'];
+      for (const ref of refs) {
+        const entry = gitEntry[harness]('demo', { source: 'url', url: 'https://github.com/acme/demo.git', ref, sha: SHA });
+        const output = validate(makeRepo(harness, { plugins: [entry] })).join('\n');
+        assert.match(output, /must set "ref" to the tag of the pinned commit/, JSON.stringify(ref));
       }
     });
 
@@ -178,7 +189,7 @@ for (const harness of ['claude', 'codex']) {
 
     test('--check-remote fetches at most MAX_REMOTE_CHECKS entries', () => {
       const plugins = Array.from({ length: MAX_REMOTE_CHECKS + 1 }, (_, i) =>
-        gitEntry[harness](`demo-${i}`, { source: 'url', url: `https://github.com/acme/demo-${i}.git`, sha: SHA }),
+        gitEntry[harness](`demo-${i}`, { source: 'url', url: `https://github.com/acme/demo-${i}.git`, ref: REF, sha: SHA }),
       );
       const output = validate(makeRepo(harness, { plugins }), { checkRemote: true }).join('\n');
       assert.match(output, new RegExp(`fetches at most ${MAX_REMOTE_CHECKS} pinned git entries`));
@@ -459,6 +470,110 @@ for (const harness of ['claude', 'codex']) {
   });
 }
 
+/**
+ * A local repo served in place of https://github.com/acme/upstream.git, through git's url.insteadOf
+ * in environment config, so --check-remote runs real ls-remote and fetch offline. v1.0.0 is a
+ * lightweight tag on the first commit, v2.0.0 an annotated tag on the second (the tip of main).
+ */
+function makeUpstream() {
+  const dir = mkdtempSync(path.join(tmpdir(), 'marketplace-upstream-'));
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const git = (...args) =>
+    execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], {
+      cwd: dir,
+      env,
+      encoding: 'utf8',
+      stdio: 'pipe',
+    }).trim();
+  git('init', '-q', '-b', 'main');
+  git('commit', '-q', '--allow-empty', '-m', 'one');
+  git('tag', 'v1.0.0');
+  git('commit', '-q', '--allow-empty', '-m', 'two');
+  git('tag', '-a', 'v2.0.0', '-m', 'v2.0.0');
+  return {
+    dir,
+    url: 'https://github.com/acme/upstream.git',
+    first: git('rev-parse', 'v1.0.0'),
+    second: git('rev-parse', 'v2.0.0^{commit}'),
+    tagObject: git('rev-parse', 'v2.0.0'),
+    config: {
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: `url.file://${dir}/.insteadOf`,
+      GIT_CONFIG_VALUE_0: 'https://github.com/acme/upstream.git',
+      GIT_CONFIG_KEY_1: 'protocol.file.allow',
+      GIT_CONFIG_VALUE_1: 'always',
+    },
+  };
+}
+
+for (const harness of ['claude', 'codex']) {
+  describe(`${harness} --check-remote`, () => {
+    const upstream = makeUpstream();
+    const saved = {};
+    before(() => {
+      for (const [key, value] of Object.entries(upstream.config)) {
+        saved[key] = process.env[key];
+        process.env[key] = value;
+      }
+    });
+    after(() => {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      rmSync(upstream.dir, { recursive: true, force: true });
+    });
+    const check = (ref, sha) => {
+      const entry = gitEntry[harness]('demo', { source: 'url', url: upstream.url, ref, sha });
+      return validateMarketplace(makeRepo(harness, { plugins: [entry] }), harness, { checkRemote: true });
+    };
+
+    test('accepts a lightweight tag on sha', () => {
+      assert.deepEqual(check('v1.0.0', upstream.first), []);
+    });
+
+    test('accepts an annotated tag whose commit is sha', () => {
+      assert.deepEqual(check('v2.0.0', upstream.second), []);
+      assert.match(
+        check('v2.0.0', upstream.tagObject).join('\n'),
+        new RegExp(`ref "v2\\.0\\.0" resolves to ${upstream.second}, not sha ${upstream.tagObject}`),
+      );
+    });
+
+    test('rejects a tag on another commit', () => {
+      assert.match(
+        check('v1.0.0', upstream.second).join('\n'),
+        new RegExp(`ref "v1\\.0\\.0" resolves to ${upstream.first}, not sha ${upstream.second}`),
+      );
+    });
+
+    test('rejects a missing tag', () => {
+      assert.match(check('v9.9.9', upstream.first).join('\n'), /ref "v9\.9\.9" resolves to nothing, not sha/);
+    });
+
+    test('rejects a branch name instead of a tag', () => {
+      assert.match(check('main', upstream.second).join('\n'), /ref "main" resolves to nothing, not sha/);
+    });
+
+    test('still requires the commit to be fetchable', () => {
+      const output = check('v9.9.9', SHA).join('\n');
+      assert.match(output, /ref "v9\.9\.9" resolves to nothing/);
+      assert.match(output, new RegExp(`commit ${SHA} is not fetchable from ${upstream.url}`));
+    });
+
+    test('the https-only config still blocks the file:// rewrite on its own', () => {
+      process.env.GIT_CONFIG_COUNT = '1';
+      try {
+        assert.match(check('v1.0.0', upstream.first).join('\n'), /tags cannot be listed from https:\/\/github\.com\/acme\/upstream\.git/);
+      } finally {
+        process.env.GIT_CONFIG_COUNT = '2';
+      }
+    });
+  });
+}
+
 describe('parseArgs', () => {
   test('--check-remote is a boolean flag', () => {
     assert.equal(parseArgs([])['check-remote'], false);
@@ -476,7 +591,7 @@ describe('claude only', () => {
   });
 
   test('accepts a github source', () => {
-    const entry = { name: 'demo', source: { source: 'github', repo: 'acme/demo', sha: SHA } };
+    const entry = { name: 'demo', source: { source: 'github', repo: 'acme/demo', ref: REF, sha: SHA } };
     assert.deepEqual(validateMarketplace(makeRepo('claude', { plugins: [entry] }), 'claude'), []);
   });
 

@@ -4,8 +4,9 @@
 //
 //   node scripts/validate-marketplace.mjs [root] [--harness=claude|codex] [--check-remote[=true|false]]
 //
-// --harness defaults to whichever manifest exists under root. --check-remote also fetches every
-// pinned git commit over https, to prove it exists and is public (needs network and git).
+// --harness defaults to whichever manifest exists under root. --check-remote also checks every
+// pinned git entry over https: its tag `ref` must resolve to `sha`, and the commit must be fetchable
+// (needs network and git).
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -44,6 +45,7 @@ const MAX_NAME_LENGTH = 64;
 const RESERVED_NAMES = new Set(['node_modules', 'plugins', 'scripts', '.claude-plugin', '.codex-plugin']);
 const REPO_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA = /^[0-9a-f]{40}$/;
+const TAG_NAME = /^[A-Za-z0-9._@+-]+(\/[A-Za-z0-9._@+-]+)*$/;
 const SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const FORBIDDEN_FILE = new RegExp(
@@ -308,6 +310,23 @@ function isRelativePath(value) {
   );
 }
 
+/**
+ * A plausible bare tag name, like "v1.2.0", "release/1.2" or "@scope/pkg@1.2.0": no "refs/"
+ * prefix, glob, "..", part starting with "." or "-", or trailing "." or ".lock".
+ */
+function isTagName(value) {
+  return (
+    typeof value === 'string' &&
+    value.length <= 255 &&
+    TAG_NAME.test(value) &&
+    !value.startsWith('refs/') &&
+    !value.includes('..') &&
+    !value.endsWith('.') &&
+    value !== '@' &&
+    value.split('/').every(part => !part.startsWith('.') && !part.startsWith('-') && !part.endsWith('.lock'))
+  );
+}
+
 /** The plugin's git source as { url, path? }, or an error string. */
 function gitSource(source, harness) {
   const allowed = HARNESSES[harness].gitSourceTypes;
@@ -336,18 +355,49 @@ function gitSource(source, harness) {
   return { url };
 }
 
+/** Config for every git command that talks to a remote: https only, no redirects, no credentials. */
+const REMOTE_GIT_CONFIG = [
+  '-c', 'protocol.allow=never',
+  '-c', 'protocol.https.allow=always',
+  '-c', 'http.followRedirects=false',
+  '-c', 'credential.helper=',
+];
+
+/**
+ * Fails unless tag `ref` at `url` resolves to `sha`: the peeled commit for an annotated tag, the
+ * tag itself for a lightweight one. Only exact refs/tags/<ref> lines count.
+ */
+function checkRemoteTag(url, ref, sha) {
+  const tag = `refs/tags/${ref}`;
+  let listing;
+  try {
+    listing = execFileSync('git', [...REMOTE_GIT_CONFIG, 'ls-remote', url, tag, `${tag}^{}`], {
+      cwd: tmpdir(),
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 60_000,
+    });
+  } catch {
+    return `tags cannot be listed from ${url}`;
+  }
+  const objects = new Map(
+    listing.split('\n').map(line => {
+      const [object, name] = line.split('\t');
+      return [name, object];
+    }),
+  );
+  const found = objects.get(`${tag}^{}`) ?? objects.get(tag);
+  if (found === sha) return null;
+  return `ref "${ref}" resolves to ${SHA.test(found ?? '') ? found : 'nothing'}, not sha ${sha}`;
+}
+
 function checkRemoteCommit(url, sha) {
   const scratch = mkdtempSync(path.join(tmpdir(), 'validate-marketplace-'));
   const env = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
-  const safe = [
-    '-c', 'protocol.allow=never',
-    '-c', 'protocol.https.allow=always',
-    '-c', 'http.followRedirects=false',
-    '-c', 'credential.helper=',
-  ];
   try {
     execFileSync('git', ['init', '-q'], { cwd: scratch, env, stdio: 'pipe' });
-    execFileSync('git', [...safe, 'fetch', '-q', '--depth=1', url, sha], {
+    execFileSync('git', [...REMOTE_GIT_CONFIG, 'fetch', '-q', '--depth=1', url, sha], {
       cwd: scratch,
       env,
       stdio: 'pipe',
@@ -503,7 +553,10 @@ function collectProblems(root, harness, checkRemote) {
     if (typeof source.sha !== 'string' || !SHA.test(source.sha)) {
       return problem('git sources must pin "sha" to a full 40-character lowercase commit');
     }
-    remote.push({ url: git.url, sha: source.sha, problem });
+    if (!isTagName(source.ref)) {
+      return problem('git sources must set "ref" to the tag of the pinned commit, like "v1.2.0"');
+    }
+    remote.push({ url: git.url, ref: source.ref, sha: source.sha, problem });
   });
 
   if (checkRemote && remote.length > MAX_REMOTE_CHECKS) {
@@ -511,9 +564,10 @@ function collectProblems(root, harness, checkRemote) {
       `marketplace: --check-remote fetches at most ${MAX_REMOTE_CHECKS} pinned git entries, found ${remote.length}`,
     );
   } else if (checkRemote) {
-    for (const { url, sha, problem } of remote) {
-      const failure = checkRemoteCommit(url, sha);
-      if (failure) problem(failure);
+    for (const { url, ref, sha, problem } of remote) {
+      for (const failure of [checkRemoteTag(url, ref, sha), checkRemoteCommit(url, sha)]) {
+        if (failure) problem(failure);
+      }
     }
   }
 

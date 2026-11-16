@@ -78,7 +78,7 @@ Details are in the
 - Plugin names are lowercase kebab-case, at most 64 characters, unique, and not reserved (such as
   `node_modules`).
 - Every entry has a `policy` and a `category`. `installation` is `AVAILABLE` or `NOT_AVAILABLE`,
-  `authentication` is `ON_INSTALL` or `ON_USE`, and `category` is `Developer Tools` or `Productivity`.
+  `authentication` is `ON_INSTALL` or `ON_USE`, and `category` is one line of at most 64 characters.
 - An in-repo entry points at `./plugins/<name>`, that folder exists, and it has one manifest (not
   both) with the same `name` and a semver `version`.
 - Files under `plugins/` include no symlinks, submodules, `.gitattributes` drivers or invisible
@@ -88,8 +88,19 @@ Details are in the
   upstream repository.
 - Every folder in `plugins/` has an entry, and no folder holds key material, `.env` files or a
   keystore.
+- On a pull request (`--base=origin/main`), an in-repo plugin whose files changed must raise its
+  `version` in semver order, so a version never goes down.
+- Hook and MCP server commands don't pipe downloaded or base64-decoded content to a shell, don't use
+  `sudo`, and use no path outside the plugin (see the plugin security policy in
+  [CONTRIBUTING.md](CONTRIBUTING.md)).
 
-Run it locally with `node scripts/validate-marketplace.mjs . --check-remote`.
+The job summary lists what each changed plugin runs: MCP servers (with any auth block), hook
+commands, `bin/` files, app files, scripts named in skills and HTML comments in Markdown. It
+highlights a new plugin named `hedera-`, `hashgraph-` or `hiero-`, a changed source or `policy` on
+an existing entry, and a remote MCP server on a host the marketplace doesn't already use. These
+don't fail the run; reviewers check them.
+
+Run it locally with `node scripts/validate-marketplace.mjs . --check-remote --base=origin/main`.
 
 ## Review
 
